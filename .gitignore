@@ -1,0 +1,45 @@
+# Local learning data. This directory can contain original recordings,
+# transcripts, questions, progress, review notes, and deleted materials.
+.data/
+
+# Local models and downloaded inference artifacts.
+.models/
+
+# Local credentials and machine-specific configuration.
+.env*
+*.local
+.privacy-denylist.local
+
+# Dependencies and generated output.
+node_modules/
+coverage/
+.nyc_output/
+output/
+.playwright-cli/
+
+# Logs, interrupted downloads, and temporary files.
+logs/
+*.log
+*.jsonl
+*.partial
+*.part
+*.download
+*.tmp
+.partial/
+partial/
+
+# Original media must never be committed, even if copied outside .data.
+*.mp3
+*.m4a
+*.wav
+*.aac
+*.flac
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.srt
+*.vtt
+
+# macOS metadata.
+.DS_Store

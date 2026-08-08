@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["overview", "segments"],
+  "properties": {
+    "overview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summaryZh", "learningFocusZh"],
+      "properties": {
+        "summaryZh": { "type": "string" },
+        "learningFocusZh": { "type": "string" }
+      }
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "translationZh", "explanationZh", "spokenFormNotes", "phrases", "questionZh"],
+        "properties": {
+          "id": { "type": "string" },
+          "translationZh": { "type": "string" },
+          "explanationZh": { "type": "string" },
+          "spokenFormNotes": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sourceText", "kind", "explanationZh", "correctedEnglish"],
+              "properties": {
+                "sourceText": { "type": "string" },
+                "kind": { "type": "string", "enum": ["disfluency", "grammar", "mistranscription"] },
+                "explanationZh": { "type": "string" },
+                "correctedEnglish": { "type": "string" }
+              }
+            }
+          },
+          "phrases": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["text", "meaningZh", "usageZh"],
+              "properties": {
+                "text": { "type": "string" },
+                "meaningZh": { "type": "string" },
+                "usageZh": { "type": "string" }
+              }
+            }
+          },
+          "questionZh": { "type": "string" }
+        }
+      }
+    }
+  }
+}

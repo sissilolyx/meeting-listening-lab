@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answerZh", "learningSummaryZh", "grammarPointZh", "transcriptStatus", "likelySpokenEnglish", "intendedMeaningZh"],
+  "properties": {
+    "answerZh": { "type": "string" },
+    "learningSummaryZh": { "type": "string" },
+    "grammarPointZh": { "type": "string" },
+    "transcriptStatus": { "type": "string", "enum": ["credible", "likely_mistranscribed"] },
+    "likelySpokenEnglish": { "type": "string" },
+    "intendedMeaningZh": { "type": "string" }
+  }
+}

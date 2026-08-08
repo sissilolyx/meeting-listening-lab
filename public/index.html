@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>原声精听</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell" id="appShell">
+      <aside class="library-rail" id="libraryRail" aria-label="精听材料库">
+        <div class="brand-block">
+          <button
+            class="library-rail-toggle"
+            id="libraryRailToggle"
+            type="button"
+            aria-expanded="true"
+            aria-controls="materialRailContent"
+            aria-label="收起材料库"
+            title="收起材料库"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+              <path d="M5 6h14M5 12h9M5 18h14M18 9l-3 3 3 3" />
+            </svg>
+          </button>
+          <button class="brand-button" id="homeButton" type="button" aria-label="返回材料库首页">
+            <span class="brand-mark" aria-hidden="true">声</span>
+            <span class="brand-copy">
+              <strong>原声精听</strong>
+              <small>Real meeting practice</small>
+            </span>
+          </button>
+        </div>
+
+        <div class="material-rail-content" id="materialRailContent">
+          <div class="rail-heading">
+            <span>材料库</span>
+            <button class="icon-button" id="newImportButton" type="button" aria-label="导入新材料">＋</button>
+          </div>
+          <nav id="materialList" class="material-list" aria-label="已导入材料"></nav>
+        </div>
+
+        <div class="system-status" id="systemStatus" aria-live="polite">
+          <span class="status-dot"></span>
+          <span>正在检查本机能力</span>
+        </div>
+
+        <button class="trash-rail-button" id="trashButton" type="button" aria-haspopup="dialog" aria-controls="trashDialog">
+          <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+            <path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" />
+          </svg>
+          <span>垃圾桶</span>
+          <i class="is-hidden" id="trashCount" aria-label="0 份已删除材料">0</i>
+        </button>
+      </aside>
+
+      <main class="main-stage">
+        <section id="homeView" class="home-view">
+          <header class="home-intro">
+            <p class="eyebrow">YOUR REAL ENGLISH, SLOWED DOWN</p>
+            <h1>把开过的会，<br>练成听得懂的英语。</h1>
+            <p class="home-copy">使用原始会议声音，逐句听写、核对和理解。录屏留在本机，Codex 只负责把转写变成学习内容。</p>
+          </header>
+
+          <div class="import-workbench" id="importWorkbench">
+            <div class="import-tabs" role="tablist" aria-label="导入方式">
+              <button class="import-tab is-active" id="larkTab" role="tab" aria-selected="true" aria-controls="larkImport" type="button">飞书妙记</button>
+              <button class="import-tab" id="fileTab" role="tab" aria-selected="false" aria-controls="fileImport" type="button">本地文件</button>
+            </div>
+
+            <section class="import-panel" id="larkImport" role="tabpanel" aria-labelledby="larkTab">
+              <label for="larkUrl">粘贴飞书录屏或妙记链接</label>
+              <div class="url-entry">
+                <input id="larkUrl" type="url" autocomplete="off" placeholder="https://...larkoffice.com/minutes/...">
+                <button class="primary-button" id="importLarkButton" type="button">开始解析</button>
+              </div>
+              <p class="field-note">将读取逐字稿并下载原始录屏。遇到无权限时只提示，不会自动申请。</p>
+            </section>
+
+            <section class="import-panel is-hidden" id="fileImport" role="tabpanel" aria-labelledby="fileTab">
+              <label class="drop-zone" id="dropZone" for="fileInput" role="button" tabindex="0" aria-label="选择、拖入或粘贴音频或录屏">
+                <input id="fileInput" type="file" accept=".mp3,.m4a,.wav,.mp4,.mov,audio/*,video/mp4,video/quicktime">
+                <span class="drop-icon" aria-hidden="true">↥</span>
+                <strong>选择、拖入或粘贴音频</strong>
+                <span class="paste-hint">语音备忘录复制后按 <kbd>⌘V</kbd></span>
+                <small>也支持 MP3、M4A、WAV、MP4、MOV</small>
+              </label>
+            </section>
+
+            <div class="job-panel is-hidden" id="jobPanel" aria-live="polite">
+              <div class="job-meta">
+                <span id="jobStage">准备处理</span>
+                <span id="jobPercent">0%</span>
+              </div>
+              <div class="progress-track" aria-hidden="true"><span id="jobProgress"></span></div>
+              <p id="jobDetail">可以离开此页面，处理完成后材料会保存在本机。</p>
+            </div>
+          </div>
+
+          <div class="privacy-line">
+            <span>本地媒体</span>
+            <span>原声播放</span>
+            <span>Codex 订阅解析</span>
+          </div>
+        </section>
+
+        <section id="trainingView" class="training-view is-hidden" aria-label="精听训练">
+          <header class="training-header">
+            <div>
+              <button class="back-link" id="backButton" type="button">← 材料库</button>
+              <h2 id="materialTitle">会议标题</h2>
+              <p id="materialMeta">0 分钟 · 0 个自然分段</p>
+            </div>
+            <div class="header-actions">
+              <button class="quiet-button resume-button is-hidden" id="resumeButton" type="button">继续上次</button>
+              <button class="quiet-button" id="segmentListButton" type="button" aria-expanded="false" aria-controls="segmentDrawer">片段目录</button>
+              <button class="quiet-button" id="reviewFilterButton" type="button" aria-pressed="false">只听需复习</button>
+            </div>
+          </header>
+
+          <div class="training-grid" id="trainingGrid">
+            <section class="media-column" id="mediaColumn" aria-label="原始录屏与播放控制" tabindex="0">
+              <div class="media-stage" id="mediaStage"></div>
+              <div class="unit-playback-progress">
+                <div class="unit-playback-track" id="unitPlaybackTrack" role="slider" tabindex="0" aria-label="拖动定位当前自然分段" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                  <em class="unit-playback-context" id="unitPlaybackContext" aria-hidden="true"></em>
+                  <span id="unitPlaybackFill"></span>
+                  <i id="unitPlaybackThumb" aria-hidden="true"></i>
+                </div>
+                <div class="unit-playback-meta">
+                  <span id="unitPlaybackLabel">当前自然分段</span>
+                  <span id="unitPlaybackTime">00:00 / 00:00</span>
+                </div>
+              </div>
+              <div class="transport">
+                <button class="transport-button" id="previousButton" type="button" aria-label="上一片段">←</button>
+                <button class="play-button" id="playButton" type="button" aria-label="播放当前片段">播放</button>
+                <button class="transport-button" id="replayButton" type="button" aria-label="重播当前片段">↺</button>
+                <button class="transport-button" id="nextButton" type="button" aria-label="下一片段">→</button>
+                <button class="loop-button" id="loopButton" type="button" aria-pressed="false">循环</button>
+                <div class="speed-switch" role="group" aria-label="播放速度">
+                  <button data-speed="0.75" type="button">0.75×</button>
+                  <button class="is-active" data-speed="1" type="button">1×</button>
+                </div>
+              </div>
+              <div class="media-caption">
+                <span id="unitSpeaker">Speaker</span>
+                <span id="unitTime">00:00</span>
+              </div>
+              <div class="overview-block is-hidden" id="overviewBlock">
+                <span>会议背景</span>
+                <p id="overviewText"></p>
+              </div>
+            </section>
+
+            <div
+              class="pane-resizer"
+              id="paneResizer"
+              role="separator"
+              aria-label="调整录屏和练习区宽度"
+              aria-orientation="vertical"
+              aria-valuemin="30"
+              aria-valuemax="70"
+              aria-valuenow="44"
+              tabindex="0"
+              title="拖动调整宽度；双击恢复默认"
+            ><span aria-hidden="true"></span></div>
+
+            <section class="practice-column" id="practiceColumn" aria-label="听写与逐句讲解" tabindex="0">
+              <div class="practice-progress">
+                <span id="unitCounter">1 / 1</span>
+                <div class="progress-track"><span id="studyProgress"></span></div>
+              </div>
+
+              <article class="practice-unit">
+                <div class="listen-prompt" id="listenPrompt" tabindex="-1">
+                  <span class="step-number">01</span>
+                  <div>
+                    <p class="step-label">先听原声</p>
+                    <h3>不看文字，听清这个片段。</h3>
+                  </div>
+                </div>
+
+                <label class="dictation-field" for="dictationInput">
+                  <span>写下你听到的内容（可跳过）</span>
+                  <textarea id="dictationInput" rows="4" spellcheck="false" placeholder="Type what you hear..."></textarea>
+                </label>
+
+                <button class="reveal-button" id="revealButton" type="button">查看原文与讲解</button>
+
+                <div class="answer-area is-hidden" id="answerArea">
+                  <div class="answer-heading">
+                    <span class="step-number">02</span>
+                    <div>
+                      <p class="step-label">逐句核对与讲解</p>
+                      <p class="speaker-label" id="answerSpeaker"></p>
+                    </div>
+                    <button class="text-button" id="editTranscriptButton" type="button">修正原文</button>
+                  </div>
+                  <div class="diff-block is-hidden" id="diffBlock">
+                    <span>你遗漏或听错的部分</span>
+                    <p id="diffText" tabindex="0" aria-label="听写差异，可划选文字后提问"></p>
+                  </div>
+                  <div class="sentence-context is-hidden" id="sentenceContext">
+                    <span>所在语境</span>
+                    <p id="previousSentenceContext"></p>
+                    <p class="is-current" id="currentSentenceContext"></p>
+                    <p id="nextSentenceContext"></p>
+                  </div>
+                  <div class="edit-transcript is-hidden" id="editTranscriptPanel">
+                    <textarea id="transcriptEditInput" rows="4"></textarea>
+                    <div>
+                      <button class="quiet-button" id="cancelEditButton" type="button">取消</button>
+                      <button class="primary-button compact" id="saveTranscriptButton" type="button">保存修正</button>
+                    </div>
+                  </div>
+                  <div class="sentence-breakdown-list" id="sentenceBreakdownList" aria-label="按自然句排列的原文与知识点，可划选英文后提问"></div>
+                </div>
+
+                <div class="rating-row">
+                  <button class="review-button" id="markReviewButton" type="button" aria-pressed="false">
+                    <strong id="markReviewLabel">加入本段复习</strong>
+                    <span id="markReviewHint">需要再听时点这里</span>
+                  </button>
+                </div>
+
+                <div class="analysis-retry is-hidden" id="analysisRetry">
+                  <span>Codex 讲解尚未生成，但原声精听可以继续。</span>
+                  <button class="text-button" id="retryAnalysisButton" type="button">重新生成讲解</button>
+                </div>
+
+                <footer class="segment-continuation is-hidden" id="segmentContinuation" aria-label="继续学习">
+                  <button class="segment-next-button" id="bottomNextButton" type="button">
+                    <span class="segment-next-copy">
+                      <small id="bottomNextEyebrow">继续精听</small>
+                      <strong id="bottomNextLabel">下一段</strong>
+                      <span id="bottomNextHint">回到顶部并自动播放原声</span>
+                    </span>
+                    <span class="segment-next-arrow" aria-hidden="true">→</span>
+                  </button>
+                  <div class="segment-complete-state is-hidden" id="segmentCompleteState" role="status">
+                    <small>本段完成</small>
+                    <strong id="segmentCompleteLabel">已到最后一段</strong>
+                  </div>
+                </footer>
+                <p class="visually-hidden" id="unitNavigationStatus" aria-live="polite"></p>
+              </article>
+            </section>
+          </div>
+        </section>
+
+        <button class="segment-drawer-scrim" id="segmentDrawerScrim" type="button" aria-label="关闭片段目录" tabindex="-1"></button>
+        <aside class="segment-drawer" id="segmentDrawer" aria-label="片段目录" aria-hidden="true" inert>
+          <header class="segment-drawer-header">
+            <div>
+              <p>LISTENING MAP</p>
+              <h2>片段目录</h2>
+            </div>
+            <button class="icon-button" id="closeSegmentDrawerButton" type="button" aria-label="关闭片段目录">×</button>
+          </header>
+          <div class="segment-drawer-summary">
+            <strong id="segmentModeLabel">自然分段</strong>
+            <span id="segmentHeardSummary">已听 0 / 0</span>
+          </div>
+          <div class="segment-legend" aria-hidden="true">
+            <span><i></i>未听</span>
+            <span><i class="is-heard"></i>已听</span>
+            <span><i class="is-review"></i>需复习</span>
+          </div>
+          <nav class="segment-list" id="segmentList" aria-label="可跳转的片段"></nav>
+        </aside>
+
+        <button class="selection-ask-button is-hidden" id="selectionAskButton" type="button">问问这处</button>
+
+        <section class="ask-panel is-hidden" id="askPanel" role="dialog" aria-modal="false" aria-labelledby="askPanelTitle">
+          <header>
+            <div>
+              <span id="askPanelTitle">继续问这一处</span>
+              <strong id="askSourceText"></strong>
+            </div>
+            <button class="text-button" id="closeAskPanelButton" type="button" aria-label="关闭问问线程">关闭</button>
+          </header>
+          <div class="ask-anchor-link is-hidden" id="askAnchorLink" aria-live="polite">
+            <span id="askAnchorStatus">原句已离开当前视图</span>
+            <button class="text-button" id="askReturnToSourceButton" type="button">回到原文</button>
+          </div>
+          <label for="askQuestionInput">你还想知道什么？</label>
+          <textarea id="askQuestionInput" rows="3"></textarea>
+          <div class="ask-actions">
+            <span id="askStatusText">回答会结合这句话的前后语境。</span>
+            <button class="primary-button compact" id="askSubmitButton" type="button">问 Codex</button>
+          </div>
+          <div class="ask-answer is-hidden" id="askAnswerBlock">
+            <section class="ask-reconstruction is-hidden" id="askReconstructionBlock">
+              <div>
+                <span>逐字稿疑似听错</span>
+                <strong>说话人实际最可能说的是</strong>
+              </div>
+              <p id="askReconstructedEnglish"></p>
+              <p id="askReconstructedMeaning"></p>
+            </section>
+            <p id="askAnswerText"></p>
+            <div class="ask-summary">
+              <span>知识点总结</span>
+              <p id="askSummaryText"></p>
+              <div class="ask-grammar-point is-hidden" id="askGrammarPoint">
+                <span>语法点</span>
+                <p id="askGrammarPointText"></p>
+              </div>
+            </div>
+            <button class="quiet-button" id="saveQaReviewButton" type="button">加入复习</button>
+          </div>
+        </section>
+
+        <dialog class="confirmation-dialog" id="deleteMaterialDialog" aria-labelledby="deleteMaterialDialogTitle" aria-describedby="deleteMaterialDialogDescription">
+          <div class="confirmation-dialog-content">
+            <p class="confirmation-dialog-kicker">移入垃圾桶</p>
+            <h2 id="deleteMaterialDialogTitle">确定移入垃圾桶？</h2>
+            <p id="deleteMaterialDialogDescription">
+              <strong id="deleteMaterialName"></strong>
+              的本机音频或录屏、原文、学习进度和复习内容都会移入垃圾桶，30 天内可以恢复。
+            </p>
+            <p class="confirmation-dialog-error is-hidden" id="deleteMaterialError" role="alert"></p>
+            <div class="confirmation-dialog-actions">
+              <button class="quiet-button" id="cancelDeleteMaterialButton" type="button">取消</button>
+              <button class="danger-button" id="confirmDeleteMaterialButton" type="button">移入垃圾桶</button>
+            </div>
+          </div>
+        </dialog>
+
+        <dialog class="trash-dialog" id="trashDialog" aria-labelledby="trashDialogTitle">
+          <div class="trash-dialog-content">
+            <header class="trash-dialog-header">
+              <div>
+                <p>RECENTLY DELETED</p>
+                <h2 id="trashDialogTitle">垃圾桶</h2>
+              </div>
+              <button class="icon-button" id="closeTrashButton" type="button" aria-label="关闭垃圾桶">×</button>
+            </header>
+            <p class="trash-dialog-note">删除的材料会保留 30 天。到期后，会在下次打开应用或垃圾桶时从本机永久清理。</p>
+            <div class="trash-list" id="trashList" aria-live="polite"></div>
+          </div>
+        </dialog>
+
+        <div class="toast" id="toast" role="status" aria-live="polite">
+          <span id="toastText"></span>
+          <button class="toast-action is-hidden" id="toastActionButton" type="button">撤销</button>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
