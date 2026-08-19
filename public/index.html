@@ -17,7 +17,7 @@
             id="libraryRailToggle"
             type="button"
             aria-expanded="true"
-            aria-controls="materialRailContent"
+            aria-controls="globalStudyControls materialRailContent"
             aria-label="收起材料库"
             title="收起材料库"
           >
@@ -33,6 +33,33 @@
             </span>
           </button>
         </div>
+
+        <section class="global-study-controls rail-study-controls" id="globalStudyControls" aria-labelledby="globalStudyTitle">
+          <h2 class="visually-hidden" id="globalStudyTitle">学习模式</h2>
+          <div class="study-mode-switch" role="group" aria-label="切换学习模式">
+            <button type="button" data-study-mode="intensive" aria-label="切换到精听模式" aria-pressed="true">
+              <span class="study-mode-full-label">精听模式</span>
+              <span class="study-mode-compact-label" aria-hidden="true">听</span>
+            </button>
+            <button type="button" data-study-mode="review" aria-label="切换到复习模式" aria-pressed="false">
+              <span class="study-mode-full-label">复习模式</span>
+              <span class="study-mode-compact-label" aria-hidden="true">复</span>
+            </button>
+          </div>
+          <label class="review-scope-control is-hidden">
+            <span>复习范围</span>
+            <select data-review-scope aria-label="选择复习范围"></select>
+          </label>
+        </section>
+
+        <button class="ai-settings-rail-button" id="aiSettingsRailButton" type="button" aria-haspopup="dialog" aria-controls="aiSettingsDialog">
+          <span class="ai-settings-rail-mark" aria-hidden="true">AI</span>
+          <span class="ai-settings-rail-copy">
+            <strong id="aiSettingsRailLabel">AI讲解 · 正在检查</strong>
+            <small id="aiSettingsRailHint">选择自己的 AI 账户</small>
+          </span>
+          <span class="ai-settings-rail-dot" id="aiSettingsRailDot" aria-hidden="true"></span>
+        </button>
 
         <div class="material-rail-content" id="materialRailContent">
           <div class="rail-heading">
@@ -61,7 +88,7 @@
           <header class="home-intro">
             <p class="eyebrow">YOUR REAL ENGLISH, SLOWED DOWN</p>
             <h1>把开过的会，<br>练成听得懂的英语。</h1>
-            <p class="home-copy">使用原始会议声音，逐句听写、核对和理解。录屏留在本机，Codex 只负责把转写变成学习内容。</p>
+            <p class="home-copy">使用原始会议声音，逐句听写、核对和理解。录屏留在本机，所选 AI 只负责把转写变成学习内容。</p>
           </header>
 
           <div class="import-workbench" id="importWorkbench">
@@ -102,7 +129,7 @@
           <div class="privacy-line">
             <span>本地媒体</span>
             <span>原声播放</span>
-            <span>Codex 订阅解析</span>
+            <span>自己的 AI 账户解析</span>
           </div>
         </section>
 
@@ -114,9 +141,13 @@
               <p id="materialMeta">0 分钟 · 0 个自然分段</p>
             </div>
             <div class="header-actions">
+              <div class="media-view-switch is-hidden" id="mediaViewSwitch" role="group" aria-label="媒体显示方式">
+                <button type="button" data-media-view="visual" aria-pressed="true">画面</button>
+                <button type="button" data-media-view="listen" aria-pressed="false">纯听</button>
+              </div>
+              <button class="quiet-button material-completion-button" id="materialCompletionButton" type="button" aria-pressed="false">标记已学完</button>
               <button class="quiet-button resume-button is-hidden" id="resumeButton" type="button">继续上次</button>
               <button class="quiet-button" id="segmentListButton" type="button" aria-expanded="false" aria-controls="segmentDrawer">片段目录</button>
-              <button class="quiet-button" id="reviewFilterButton" type="button" aria-pressed="false">只听需复习</button>
             </div>
           </header>
 
@@ -140,13 +171,10 @@
                 <button class="transport-button" id="replayButton" type="button" aria-label="重播当前片段">↺</button>
                 <button class="transport-button" id="nextButton" type="button" aria-label="下一片段">→</button>
                 <button class="loop-button" id="loopButton" type="button" aria-pressed="false">循环</button>
-                <div class="speed-switch" role="group" aria-label="播放速度">
-                  <button data-speed="0.75" type="button">0.75×</button>
-                  <button class="is-active" data-speed="1" type="button">1×</button>
-                </div>
               </div>
               <div class="media-caption">
                 <span id="unitSpeaker">Speaker</span>
+                <div class="listen-only-progress-slot" id="listenOnlyProgressSlot"></div>
                 <span id="unitTime">00:00</span>
               </div>
               <div class="overview-block is-hidden" id="overviewBlock">
@@ -169,9 +197,11 @@
             ><span aria-hidden="true"></span></div>
 
             <section class="practice-column" id="practiceColumn" aria-label="听写与逐句讲解" tabindex="0">
-              <div class="practice-progress">
-                <span id="unitCounter">1 / 1</span>
-                <div class="progress-track"><span id="studyProgress"></span></div>
+              <div id="practiceProgressSlot">
+                <div class="practice-progress" id="practiceProgress" role="progressbar" aria-label="当前学习位置" aria-valuemin="0" aria-valuemax="1" aria-valuenow="1" aria-valuetext="当前第 1 段，共 1 段">
+                  <span id="unitCounter">1 / 1</span>
+                  <div class="progress-track"><span id="studyProgress"></span></div>
+                </div>
               </div>
 
               <article class="practice-unit">
@@ -227,7 +257,7 @@
                 </div>
 
                 <div class="analysis-retry is-hidden" id="analysisRetry">
-                  <span>Codex 讲解尚未生成，但原声精听可以继续。</span>
+                  <span>AI 讲解尚未生成，但原声精听可以继续。</span>
                   <button class="text-button" id="retryAnalysisButton" type="button">重新生成讲解</button>
                 </div>
 
@@ -274,45 +304,104 @@
 
         <button class="selection-ask-button is-hidden" id="selectionAskButton" type="button">问问这处</button>
 
-        <section class="ask-panel is-hidden" id="askPanel" role="dialog" aria-modal="false" aria-labelledby="askPanelTitle">
-          <header>
+        <aside class="ask-panel is-hidden" id="askPanel" aria-labelledby="askPanelTitle">
+          <header class="ask-rail-header">
             <div>
-              <span id="askPanelTitle">继续问这一处</span>
-              <strong id="askSourceText"></strong>
+              <span class="ask-rail-kicker">ASK AI</span>
+              <h2 id="askPanelTitle">深入问问</h2>
+              <p class="ask-rail-summary" aria-live="polite">
+                <span id="askRailTotalCount">0 条问问</span>
+                <span class="is-hidden" id="askRailPendingCount">0 条生成中</span>
+              </p>
             </div>
-            <button class="text-button" id="closeAskPanelButton" type="button" aria-label="关闭问问线程">关闭</button>
+            <button class="text-button" id="closeAskPanelButton" type="button" aria-label="收起深入问问栏">收起</button>
           </header>
-          <div class="ask-anchor-link is-hidden" id="askAnchorLink" aria-live="polite">
-            <span id="askAnchorStatus">原句已离开当前视图</span>
-            <button class="text-button" id="askReturnToSourceButton" type="button">回到原文</button>
-          </div>
-          <label for="askQuestionInput">你还想知道什么？</label>
-          <textarea id="askQuestionInput" rows="3"></textarea>
-          <div class="ask-actions">
-            <span id="askStatusText">回答会结合这句话的前后语境。</span>
-            <button class="primary-button compact" id="askSubmitButton" type="button">问 Codex</button>
-          </div>
-          <div class="ask-answer is-hidden" id="askAnswerBlock">
-            <section class="ask-reconstruction is-hidden" id="askReconstructionBlock">
-              <div>
-                <span>逐字稿疑似听错</span>
-                <strong>说话人实际最可能说的是</strong>
-              </div>
-              <p id="askReconstructedEnglish"></p>
-              <p id="askReconstructedMeaning"></p>
-            </section>
-            <p id="askAnswerText"></p>
-            <div class="ask-summary">
-              <span>知识点总结</span>
-              <p id="askSummaryText"></p>
-              <div class="ask-grammar-point is-hidden" id="askGrammarPoint">
-                <span>语法点</span>
-                <p id="askGrammarPointText"></p>
-              </div>
+          <div class="ask-thread-list" id="askThreadList" aria-live="polite">
+            <div class="ask-thread-empty" id="askThreadEmpty">
+              <strong>还没有深入问问</strong>
+              <p>在原文或知识点中选中想了解的内容，就能在这里开启一张独立卡片。</p>
             </div>
-            <button class="quiet-button" id="saveQaReviewButton" type="button">加入复习</button>
           </div>
-        </section>
+        </aside>
+
+        <button class="ask-rail-toggle is-hidden" id="askRailToggle" type="button" aria-expanded="false" aria-controls="askPanel" aria-label="展开深入问问栏">
+          <span class="ask-rail-toggle-label">深入问问</span>
+          <span class="ask-rail-toggle-count" id="askRailToggleCount">0</span>
+          <span class="ask-rail-toggle-pending is-hidden" id="askRailTogglePending">生成中</span>
+        </button>
+
+        <dialog class="ai-settings-dialog" id="aiSettingsDialog" aria-labelledby="aiSettingsDialogTitle" aria-describedby="aiSettingsDialogIntro">
+          <form class="ai-settings-dialog-content" id="aiSettingsForm">
+            <header class="ai-settings-dialog-header">
+              <div>
+                <p>AI EXPLANATION</p>
+                <h2 id="aiSettingsDialogTitle">选择 AI 讲解账户</h2>
+              </div>
+              <button class="icon-button" id="closeAiSettingsButton" type="button" aria-label="关闭 AI 讲解设置">×</button>
+            </header>
+
+            <p class="ai-settings-intro" id="aiSettingsDialogIntro">使用你已经登录的 Codex 或 Cursor 账户。这里不会要求你填写 Token。</p>
+
+            <div class="ai-settings-load-error is-hidden" id="aiSettingsLoadError" role="alert"></div>
+
+            <fieldset class="ai-provider-fieldset" id="aiProviderFieldset">
+              <legend>1. 选择账户</legend>
+              <div class="ai-provider-options">
+                <label class="ai-provider-option" data-ai-provider-option="codex">
+                  <input type="radio" name="aiProvider" value="codex">
+                  <span class="ai-provider-option-copy">
+                    <strong>Codex</strong>
+                    <small>使用当前电脑已登录的 ChatGPT / Codex 订阅</small>
+                  </span>
+                  <span class="ai-provider-status" id="aiCodexStatus">检查中</span>
+                </label>
+                <label class="ai-provider-option" data-ai-provider-option="cursor">
+                  <input type="radio" name="aiProvider" value="cursor">
+                  <span class="ai-provider-option-copy">
+                    <strong>Cursor</strong>
+                    <small>使用当前电脑已登录的 Cursor Agent 账户</small>
+                  </span>
+                  <span class="ai-provider-status" id="aiCursorStatus">检查中</span>
+                </label>
+              </div>
+            </fieldset>
+
+            <section class="ai-account-state" aria-labelledby="aiAccountStateTitle">
+              <div class="ai-settings-section-heading">
+                <span id="aiAccountStateTitle">2. 检查安装与登录</span>
+                <button class="text-button" id="refreshAiSettingsButton" type="button">重新检查</button>
+              </div>
+              <p id="aiAccountStateMessage">选择一个账户后，这里会显示本机安装和登录状态。</p>
+            </section>
+
+            <label class="ai-model-control" for="aiModelSelect">
+              <span>3. 选择模型</span>
+              <select id="aiModelSelect" disabled>
+                <option value="">请先选择可用账户</option>
+              </select>
+              <small id="aiModelDescription">模型列表来自所选账户的本机 CLI，会随账号和版本动态更新。</small>
+            </label>
+
+            <section class="ai-settings-privacy" aria-label="隐私说明">
+              <span class="ai-settings-privacy-mark" aria-hidden="true">仅本机</span>
+              <div>
+                <strong>原始材料不会交给 GitHub，也不会在这里保存 Token。</strong>
+                <p>音视频、学习进度和问问记录留在这台电脑。只有你主动发起的新讲解所需的文字语境，会发送给当前选择的账户。</p>
+              </div>
+            </section>
+
+            <p class="ai-settings-scope-note">切换账户或模型只影响之后新建的讲解任务，已经生成的讲解不会重新生成。</p>
+            <p class="ai-settings-error is-hidden" id="aiSettingsError" role="alert"></p>
+            <p class="ai-settings-test-result is-hidden" id="aiSettingsTestResult" role="status" aria-live="polite"></p>
+
+            <footer class="ai-settings-actions">
+              <button class="quiet-button" id="testAiSettingsButton" type="button">测试连接</button>
+              <span class="ai-settings-action-spacer"></span>
+              <button class="quiet-button" id="cancelAiSettingsButton" type="button">取消</button>
+              <button class="primary-button" id="saveAiSettingsButton" type="submit">保存并继续</button>
+            </footer>
+          </form>
+        </dialog>
 
         <dialog class="confirmation-dialog" id="deleteMaterialDialog" aria-labelledby="deleteMaterialDialogTitle" aria-describedby="deleteMaterialDialogDescription">
           <div class="confirmation-dialog-content">
@@ -341,6 +430,19 @@
             </header>
             <p class="trash-dialog-note">删除的材料会保留 30 天。到期后，会在下次打开应用或垃圾桶时从本机永久清理。</p>
             <div class="trash-list" id="trashList" aria-live="polite"></div>
+          </div>
+        </dialog>
+
+        <dialog class="completion-celebration" id="completionCelebration" aria-labelledby="completionCelebrationTitle">
+          <div class="completion-confetti" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <div class="completion-celebration-content">
+            <span class="completion-celebration-mark" aria-hidden="true">✓</span>
+            <p>INTENSIVE LISTENING COMPLETE</p>
+            <h2 id="completionCelebrationTitle">恭喜你，这份材料已经学完啦！</h2>
+            <span>最后一个自然分段已完整听完，材料已自动标记为「已学完」。</span>
+            <button class="primary-button" id="closeCompletionCelebrationButton" type="button">收下这份进步</button>
           </div>
         </dialog>
 

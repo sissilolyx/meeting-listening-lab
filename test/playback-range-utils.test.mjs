@@ -2,12 +2,49 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  hasReliableSentencePlayback,
   playbackLeadInRatio,
   playbackTargetCompletion,
   resolveParagraphLeadIn,
   resolveParagraphPlaybackRange,
   resolveSentencePlaybackRange,
 } from "../public/playback-range-utils.js";
+
+test("an estimated sentence needs calibrated bounds before sentence-level playback", () => {
+  const estimated = sentence("synthetic-estimated", 10, 15, "synthetic-block");
+  assert.equal(hasReliableSentencePlayback(estimated), false);
+  assert.equal(hasReliableSentencePlayback({
+    ...estimated,
+    playbackStart: 10.4,
+    playbackEnd: 14.8,
+    playbackTimingQuality: "whisper-aligned",
+  }), true);
+  assert.equal(hasReliableSentencePlayback({
+    ...estimated,
+    timingQuality: "source",
+  }), false);
+  assert.equal(hasReliableSentencePlayback({
+    ...estimated,
+    timingQuality: "unknown",
+  }), false);
+  assert.equal(hasReliableSentencePlayback({
+    ...estimated,
+    timingQuality: "source",
+    end: estimated.start,
+  }), false);
+  assert.equal(hasReliableSentencePlayback({
+    ...estimated,
+    playbackStart: 15,
+    playbackEnd: 15,
+    playbackTimingQuality: "whisper-aligned",
+  }), false);
+  assert.equal(hasReliableSentencePlayback({
+    ...estimated,
+    playbackStart: 31,
+    playbackEnd: 33,
+    playbackTimingQuality: "whisper-aligned",
+  }, 30), false);
+});
 
 test("Whisper-aligned playback bounds cover the target without expanding to adjacent sentences", () => {
   const sentences = [
@@ -127,6 +164,33 @@ test("a paragraph follows the precise first and last sentence audio bounds", () 
     end: 117.4,
     alignedStart: true,
     alignedEnd: true,
+  });
+});
+
+test("a paragraph includes a calibrated middle sentence that drifts beyond its display end", () => {
+  const sentences = [
+    sentence("synthetic-opening", 100, 104, "synthetic-block"),
+    {
+      ...sentence("synthetic-late-middle", 104, 108, "synthetic-block"),
+      playbackStart: 113.2,
+      playbackEnd: 118.6,
+    },
+    sentence("synthetic-closing", 108, 112, "synthetic-block"),
+  ];
+  const unit = {
+    id: "synthetic-drifted-paragraph",
+    start: 100,
+    end: 112,
+    sentenceIds: sentences.map((item) => item.id),
+  };
+
+  assert.deepEqual(resolveParagraphPlaybackRange({ unit, sentences }), {
+    start: 100,
+    contentStart: 100,
+    contentEnd: 118.6,
+    end: 118.6,
+    alignedStart: false,
+    alignedEnd: false,
   });
 });
 

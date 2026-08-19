@@ -32,6 +32,26 @@ export function resolveSentencePlaybackRange({ sentence, sentences, mediaDuratio
   return standard;
 }
 
+// A sentence split from a speaker block has only a proportional display
+// timestamp until Whisper finds the actual words. That estimate is useful for
+// ordering the transcript, but it is not safe enough for a sentence-level
+// play button: a missing/duplicate transcript sentence can otherwise play an
+// unrelated fragment from the same block.
+export function hasReliableSentencePlayback(sentence, mediaDuration = Infinity) {
+  const hasAlignedPlayback = hasPlaybackBounds(sentence);
+  if (!hasAlignedPlayback) return false;
+
+  const requestedStart = Number(sentence.playbackStart);
+  const requestedEnd = Number(sentence.playbackEnd);
+  const numericDuration = Number(mediaDuration);
+  const safeMediaEnd = Number.isFinite(numericDuration) && numericDuration > 0
+    ? numericDuration
+    : Infinity;
+  const contentStart = Math.max(0, Math.min(requestedStart, safeMediaEnd));
+  const contentEnd = Math.max(contentStart, Math.min(requestedEnd, safeMediaEnd));
+  return contentEnd - contentStart >= 0.05;
+}
+
 export function resolveParagraphPlaybackRange({ unit, sentences, mediaDuration = Infinity } = {}) {
   const displayStart = Math.max(0, Number(unit?.start) || 0);
   const displayEnd = Math.max(displayStart, Number(unit?.end) || displayStart);
@@ -41,6 +61,9 @@ export function resolveParagraphPlaybackRange({ unit, sentences, mediaDuration =
     .filter(Boolean);
   const firstSentence = targetSentences[0];
   const lastSentence = targetSentences.at(-1);
+  const alignedRanges = targetSentences
+    .filter(hasPlaybackBounds)
+    .map((sentence) => resolveSentencePlaybackRange({ sentence, sentences, mediaDuration }));
   const firstRange = firstSentence
     ? resolveSentencePlaybackRange({ sentence: firstSentence, sentences, mediaDuration })
     : null;
@@ -52,10 +75,22 @@ export function resolveParagraphPlaybackRange({ unit, sentences, mediaDuration =
   const safeMediaEnd = Number.isFinite(Number(mediaDuration))
     ? Math.max(0, Number(mediaDuration))
     : Infinity;
-  const contentStart = Math.min(firstIsAligned ? firstRange.start : displayStart, safeMediaEnd);
+  const earliestAlignedStart = alignedRanges.length
+    ? Math.min(...alignedRanges.map((range) => range.start))
+    : displayStart;
+  const latestAlignedEnd = alignedRanges.length
+    ? Math.max(...alignedRanges.map((range) => range.end))
+    : displayEnd;
+  const requestedStart = firstIsAligned
+    ? firstRange.start
+    : Math.min(displayStart, earliestAlignedStart);
+  const contentStart = Math.min(requestedStart, safeMediaEnd);
+  const requestedEnd = lastIsAligned
+    ? lastRange.end
+    : Math.max(displayEnd, latestAlignedEnd);
   const contentEnd = Math.max(
     contentStart,
-    Math.min(lastIsAligned ? lastRange.end : displayEnd, safeMediaEnd),
+    Math.min(requestedEnd, safeMediaEnd),
   );
   const trailingEnd = Math.max(contentEnd, Math.min(Math.max(0, Number(unit?.playbackEnd) || 0), safeMediaEnd));
 
@@ -137,9 +172,13 @@ function sourceBlockIds(paragraph) {
 }
 
 function hasPlaybackBounds(sentence) {
-  return Number.isFinite(Number(sentence?.playbackStart))
-    && Number.isFinite(Number(sentence?.playbackEnd))
-    && Number(sentence.playbackEnd) > Number(sentence.playbackStart);
+  return hasPositiveRange(sentence?.playbackStart, sentence?.playbackEnd);
+}
+
+function hasPositiveRange(start, end) {
+  return Number.isFinite(Number(start))
+    && Number.isFinite(Number(end))
+    && Number(end) > Number(start);
 }
 
 function roundTime(value) {

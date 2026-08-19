@@ -13,7 +13,8 @@ default, or `LISTENING_DATA_DIR` when configured):
 - imported and locally generated transcripts;
 - listening progress, dictation, review items, learner feedback, and study
   position;
-- Codex question history and generated explanations; and
+- AI question history, generated explanations, and the local provider/model
+  preference; and
 - the 30-day recoverable trash.
 
 Downloaded speech-recognition models are stored in `.models/`. Both directories
@@ -21,14 +22,18 @@ are excluded from Git. Common audio and video extensions are also excluded as a
 second safeguard if a file is accidentally copied elsewhere in the repository.
 
 Each tester has a separate local data directory and uses their own locally
-authenticated tools. Installing or updating the source code does not upload or
-synchronize one tester's materials with another tester.
+authenticated official CLI accounts. Installing or updating the source code
+does not upload or synchronize one tester's materials, settings, credentials,
+or account usage with another tester.
 
 ## When external services are contacted
 
-- **Codex:** only the transcript context needed for an analysis or question is
-  passed to the tester's own locally authenticated Codex process. Original
-  audio/video is not sent to Codex by this application.
+- **Selected AI provider:** only the transcript context needed for an analysis
+  or question is passed to the tester's own locally authenticated Codex or
+  Cursor Agent process. Original audio/video is not sent to either AI provider
+  by this application. The learner chooses the provider and model on first
+  launch, can switch later from the global setting, and the application does
+  not silently fall back to the other provider.
 - **Feishu/Lark:** when a tester explicitly imports a Minutes link, the local
   Feishu/Lark tooling contacts that service using the tester's own account and
   permissions to retrieve the selected material.
@@ -40,9 +45,10 @@ The application does not silently fall back to a separately billed AI API.
 ## GitHub and support
 
 Never commit recordings, transcripts, `.data/`, `.models/`, environment files,
-logs, or generated output. Never paste private meeting content, credentials, or
-tokens into a GitHub issue, pull request, Actions log, or screenshot. Use a
-minimal fictional reproduction when reporting a bug.
+local auth/settings directories, credentials, logs, or generated output. Never
+paste private meeting content, credentials, or tokens into a GitHub issue,
+pull request, Actions log, or screenshot. Use a minimal fictional reproduction
+when reporting a bug.
 
 ## Deletion
 

@@ -7,6 +7,7 @@
     "start": "node server.mjs",
     "setup": "bash ./setup.command",
     "doctor": "node scripts/doctor.mjs",
+    "update": "node scripts/safe-update.mjs",
     "dev": "node --watch server.mjs",
     "setup:model": "node scripts/download-whisper-model.mjs",
     "test": "node --test",

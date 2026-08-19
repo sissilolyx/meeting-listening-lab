@@ -113,6 +113,217 @@ test("a strict fallback window recovers a sentence after an early source-block b
   assert(recovered.sentences[1].playbackAlignmentCoverage >= 0.8);
 });
 
+test("a stable strict extended fallback recovers a sentence that begins after the six-second window", () => {
+  const sentences = [
+    estimatedSentence(
+      "synthetic-extended-intro",
+      100,
+      104,
+      "The bronze compass remains beside the folded canvas.",
+      "synthetic-extended-block",
+    ),
+    estimatedSentence(
+      "synthetic-extended-target",
+      104,
+      109.5,
+      "After the lantern changes color carry the narrow parcel across the courtyard before closing the gate.",
+      "synthetic-extended-block",
+    ),
+  ];
+  const whisperPayload = whisper([
+    entry(100.2, 103.7, "The bronze compass remains beside the folded canvas"),
+    entry(116.2, 119.4, "After the lantern changes color carry the narrow parcel across the courtyard before closing the gate"),
+  ]);
+
+  const result = alignSentencePlaybackRanges(sentences, whisperPayload);
+  const target = result.sentences[1];
+  assert.equal(result.alignedCount, 2);
+  assert.equal(target.playbackTimingQuality, "whisper-aligned");
+  assert(target.playbackStart <= 116.2);
+  assert(target.playbackStart > 115.9);
+  assert(target.playbackEnd >= 119.4);
+  assert(target.playbackAlignmentCoverage >= 0.85);
+});
+
+test("a strict extended candidate is rejected when it crosses an existing reliable range", () => {
+  const target = estimatedSentence(
+    "synthetic-extended-collision",
+    200,
+    209,
+    "Place the copper lantern beside the marble arch before carrying the silver folder into storage.",
+    "synthetic-collision-target-block",
+  );
+  const reliable = {
+    id: "synthetic-existing-source-range",
+    sourceBlockId: "synthetic-existing-source-block",
+    speaker: "Speaker B",
+    start: 216,
+    end: 219,
+    text: "A separate source-timed utterance occupies this interval.",
+    timingQuality: "estimated",
+    playbackStart: 216,
+    playbackEnd: 219,
+    playbackTimingQuality: "manual",
+  };
+  const whisperPayload = whisper([
+    entry(216.1, 218.6, "Place the copper lantern beside the marble arch before carrying the silver folder into storage"),
+  ]);
+
+  const result = alignSentencePlaybackRanges([target, reliable], whisperPayload);
+  assert.equal(result.sentences[0].playbackStart, undefined);
+  assert.equal(result.sentences[0].playbackEnd, undefined);
+  assert.equal(result.sentences[1].start, reliable.start);
+  assert.equal(result.sentences[1].end, reliable.end);
+});
+
+test("a padding-only overlap is trimmed without discarding a stable extended candidate", () => {
+  const reliable = {
+    ...estimatedSentence(
+      "synthetic-padding-anchor",
+      290,
+      295,
+      "The earlier calibrated sentence finishes first.",
+      "synthetic-padding-anchor-block",
+    ),
+    playbackStart: 310,
+    playbackEnd: 315.1,
+    playbackTimingQuality: "manual",
+  };
+  const target = estimatedSentence(
+    "synthetic-padding-target",
+    300,
+    309,
+    "Carry the violet notebook through the quiet gallery and leave it underneath the brass clock.",
+    "synthetic-padding-target-block",
+  );
+  const whisperPayload = whisper([
+    entry(315, 318.5, "Carry the violet notebook through the quiet gallery and leave it underneath the brass clock"),
+  ]);
+
+  const result = alignSentencePlaybackRanges([reliable, target], whisperPayload);
+  const recovered = result.sentences[1];
+  assert.equal(recovered.playbackTimingQuality, "whisper-aligned");
+  assert(recovered.playbackStart >= 314.979);
+  assert(reliable.playbackEnd - recovered.playbackStart <= 0.121);
+  assert(recovered.playbackStart <= 315);
+  assert(recovered.playbackEnd >= 318.5);
+});
+
+test("strict extended candidates in different source blocks cannot claim the same Whisper span", () => {
+  const sharedText = "Move the amber telescope below the painted bridge before sunrise begins.";
+  const sentences = [
+    estimatedSentence("synthetic-shared-a", 400, 409, sharedText, "synthetic-shared-block-a"),
+    estimatedSentence("synthetic-shared-b", 408, 409, sharedText, "synthetic-shared-block-b"),
+  ];
+  const whisperPayload = whisper([entry(415.2, 418.7, sharedText)]);
+
+  const result = alignSentencePlaybackRanges(sentences, whisperPayload);
+  assert.equal(result.sentences[0].playbackStart, undefined);
+  assert.equal(result.sentences[1].playbackStart, undefined);
+  assert.equal(result.alignedCount, 0);
+  assert.equal(result.skippedCount, 2);
+});
+
+test("a phantom sentence remains unplayable even when reliable neighbours surround it", () => {
+  const sentences = [
+    estimatedSentence(
+      "synthetic-phantom-left",
+      500,
+      504,
+      "First place the green ribbon beside the window.",
+      "synthetic-phantom-block",
+    ),
+    estimatedSentence(
+      "synthetic-phantom-target",
+      504,
+      508,
+      "The imaginary submarine files a report beneath the staircase.",
+      "synthetic-phantom-block",
+    ),
+    estimatedSentence(
+      "synthetic-phantom-right",
+      508,
+      512,
+      "Then carry the blue folder into the archive.",
+      "synthetic-phantom-block",
+    ),
+  ];
+  const whisperPayload = whisper([
+    entry(500.2, 503.7, "First place the green ribbon beside the window"),
+    entry(508.2, 511.4, "Then carry the blue folder into the archive"),
+  ]);
+
+  const result = alignSentencePlaybackRanges(sentences, whisperPayload);
+  assert.equal(result.sentences[0].playbackTimingQuality, "whisper-aligned");
+  assert.equal(result.sentences[1].playbackStart, undefined);
+  assert.equal(result.sentences[1].playbackEnd, undefined);
+  assert.equal(result.sentences[2].playbackTimingQuality, "whisper-aligned");
+});
+
+test("a mismatched final proper noun is recovered without borrowing the following sentence", () => {
+  const sentences = [
+    estimatedSentence(
+      "synthetic-marigold-request",
+      300,
+      306,
+      "Please leave the copper compass beside Marigold.",
+      "synthetic-request-block",
+    ),
+    estimatedSentence(
+      "synthetic-following-request",
+      306,
+      311,
+      "Next fold the green banner under the paper bridge.",
+      "synthetic-request-block",
+    ),
+  ];
+  const whisperPayload = whisper([
+    entry(300.2, 304.8, "Please leave the copper compass beside Merrygold"),
+    entry(305.4, 309.8, "Next fold the green banner under the paper bridge"),
+  ]);
+
+  const result = alignSentencePlaybackRanges(sentences, whisperPayload);
+  const [target, following] = result.sentences;
+  assert(target.playbackEnd >= 304.8);
+  assert(target.playbackEnd < 305.4);
+  assert(following.playbackStart >= 305.2);
+  assert.equal(rangeContains(target, following), false);
+});
+
+test("an unanchored boundary mismatch cannot absorb a following ten-word utterance", () => {
+  const officialWords = Array.from({ length: 40 }, (_, index) => `target${index + 1}`);
+  const tokens = [];
+  for (let index = 0; index < 30; index += 1) {
+    tokens.push(token(
+      ` ${officialWords[index]}`,
+      400_000 + index * 100,
+      400_100 + index * 100,
+    ));
+  }
+  for (let index = 0; index < 10; index += 1) {
+    tokens.push(token(
+      ` neighbour${index + 1}`,
+      403_100 + index * 200,
+      403_200 + index * 200,
+    ));
+  }
+  const sentence = estimatedSentence(
+    "synthetic-unanchored-boundary",
+    400,
+    410,
+    `${officialWords.join(" ")}.`,
+    "synthetic-unanchored-block",
+  );
+
+  const result = alignSentencePlaybackRanges([sentence], { transcription: [{ tokens }] });
+  const target = result.sentences[0];
+  assert.equal(target.playbackAlignmentCoverage, 0.75);
+  // With no reliably aligned following sentence, recovery may retain a tiny
+  // two-word safety overlap but must not consume the rest of the utterance.
+  assert(target.playbackEnd <= 403.601);
+  assert(target.playbackEnd < 404.3);
+});
+
 test("a zero-duration acknowledgement is not swallowed by the following sentence", () => {
   const sentences = [
     estimatedSentence("synthetic-acknowledgement", 70, 70.4, "Splendid.", "synthetic-transition-block"),
@@ -170,6 +381,59 @@ test("low-confidence transcript text does not create misleading playback bounds"
   assert.equal(result.skippedCount, 1);
   assert.equal(result.sentences[0].playbackStart, undefined);
   assert.equal(result.sentences[0].playbackEnd, undefined);
+});
+
+test("scattered common words cannot impersonate a compact short sentence", () => {
+  const sentence = estimatedSentence(
+    "synthetic-amber-telescope",
+    500,
+    510,
+    "Thus they chose the amber telescope.",
+    "synthetic-compactness-block",
+  );
+  const whisperPayload = whisper([
+    entry(
+      500,
+      509,
+      "Thus perhaps the chart moves while they later chose another option and the amber marker remains",
+    ),
+  ]);
+
+  const result = alignSentencePlaybackRanges([sentence], whisperPayload);
+  assert.equal(result.alignedCount, 0);
+  assert.equal(result.skippedCount, 1);
+  assert.equal(result.sentences[0].playbackStart, undefined);
+  assert.equal(result.sentences[0].playbackEnd, undefined);
+});
+
+test("force clears a stale Whisper range after a miss but preserves a manual range", () => {
+  const stale = {
+    ...estimatedSentence("synthetic-stale-range", 600, 606, "The copper kite crosses the silent garden.", "block-stale"),
+    playbackStart: 640,
+    playbackEnd: 645,
+    playbackTimingQuality: "whisper-aligned",
+    playbackAlignmentCoverage: 1,
+  };
+  const manual = {
+    ...estimatedSentence("synthetic-manual-range", 610, 616, "The violet bell rests beside the window.", "block-manual"),
+    playbackStart: 610.4,
+    playbackEnd: 615.6,
+    playbackTimingQuality: "manual",
+  };
+  const whisperPayload = whisper([
+    entry(599, 617, "Entirely unrelated synthetic audio occupies this interval without either target utterance"),
+  ]);
+
+  const result = alignSentencePlaybackRanges([stale, manual], whisperPayload, { force: true });
+  assert.equal(result.alignedCount, 0);
+  assert.equal(result.clearedCount, 1);
+  assert.equal(result.sentences[0].playbackStart, undefined);
+  assert.equal(result.sentences[0].playbackEnd, undefined);
+  assert.equal(result.sentences[0].playbackTimingQuality, undefined);
+  assert.equal(result.sentences[0].playbackAlignmentCoverage, undefined);
+  assert.equal(result.sentences[1].playbackStart, manual.playbackStart);
+  assert.equal(result.sentences[1].playbackEnd, manual.playbackEnd);
+  assert.equal(result.sentences[1].playbackTimingQuality, "manual");
 });
 
 test("Whisper token pieces are recombined into one timed word", () => {

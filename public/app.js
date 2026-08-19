@@ -1,8 +1,23 @@
 import { clipboardContainsFiles, extractPastedMediaFile, normalizePastedMediaFile } from "./file-import-utils.js";
-import { classifyAskAnchor, resolveAskPanelTop } from "./ask-thread-utils.js";
+import {
+  AI_PROVIDER_IDS,
+  aiProviderLabel,
+  aiSelectionProblem,
+  aiSettingsRailLabel,
+  findAiModel,
+  isAiSelectionReady,
+  normalizeAiSettingsPayload,
+} from "./ai-settings-utils.js";
+import {
+  countAskThreadCards,
+  isAskRequestTokenCurrent,
+  mergeAskThreadCards,
+} from "./ask-thread-utils.js";
+import { resolveTextAnchor, segmentTextAnchors } from "./ask-text-anchor-utils.js";
 import {
   playbackLeadInRatio,
   playbackTargetCompletion,
+  hasReliableSentencePlayback,
   resolveParagraphLeadIn,
   resolveParagraphPlaybackRange,
   resolveSentencePlaybackRange,
@@ -12,8 +27,17 @@ import {
   selectPronunciationVoice,
   splitPronunciationText,
 } from "./pronunciation-utils.js";
-import { hasTranscriptReconstruction, resolvedLearningSource } from "./qa-answer-utils.js";
+import { hasTranscriptReconstruction } from "./qa-answer-utils.js";
 import { resolveLatestStudyIndex, resolveSavedStudyIndex } from "./study-position-utils.js";
+import {
+  STUDY_MODE_INTENSIVE,
+  STUDY_MODE_REVIEW,
+  loadStudyPreferences,
+  normalizeMaterialCompletion,
+  saveStudyPreferences,
+  shouldCompleteMaterial,
+  updateStudyPreferences,
+} from "./study-mode-utils.js";
 
 const DEFAULT_PANE_RATIO = 0.44;
 const DEFAULT_STUDY_MODE = "paragraphs";
@@ -21,11 +45,30 @@ const PANE_RATIO_STORAGE_KEY = "meeting-listening-pane-ratio";
 const STUDY_POSITION_STORAGE_PREFIX = "meeting-listening-position";
 const LIBRARY_PREFERENCES_STORAGE_KEY = "meeting-listening-library-preferences";
 const LIBRARY_RAIL_COLLAPSED_STORAGE_KEY = "meeting-listening-library-rail-collapsed";
+const MEDIA_VIEW_STORAGE_PREFIX = "meeting-listening-media-view";
+const MEDIA_VIEW_VISUAL = "visual";
+const MEDIA_VIEW_LISTEN = "listen";
+const PHRASE_EXPOSURE_MIN_RATIO = 0.6;
+const PHRASE_EXPOSURE_DELAY_MS = 1200;
+const PHRASE_SIGNAL_SESSION_ID = globalThis.crypto?.randomUUID?.()
+  || `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const INLINE_SEGMENT_DRAWER_QUERY = "(min-width: 1400px)";
-const DOCKED_ASK_THREAD_QUERY = "(min-width: 1880px)";
+const initialStudyPreferences = loadStudyPreferences(globalThis.localStorage);
 
 const state = {
   status: null,
+  aiSettings: normalizeAiSettingsPayload(),
+  aiSettingsLoaded: false,
+  aiSettingsLoading: false,
+  aiSettingsSaving: false,
+  aiSettingsTesting: false,
+  aiSettingsDialogMode: "settings",
+  aiSettingsDraftProvider: "",
+  aiSettingsDraftModel: "",
+  aiSettingsLoadError: "",
+  aiSettingsActionError: "",
+  aiSettingsTestMessage: "",
+  aiSettingsTestSucceeded: false,
   materials: [],
   trash: [],
   trashLoading: false,
@@ -34,11 +77,26 @@ const state = {
   material: null,
   mode: DEFAULT_STUDY_MODE,
   reviewOnly: false,
+  studyPreferences: initialStudyPreferences,
+  committedStudyPreferences: initialStudyPreferences,
+  studyPreferenceOperationId: 0,
+  reviewQueue: [],
+  reviewQueueIndex: 0,
+  committedReviewQueue: [],
+  committedReviewQueueIndex: 0,
+  reviewQueueRequestId: 0,
+  reviewActivationRequestId: 0,
+  materialOpenRequestId: 0,
+  reviewQueueLoading: false,
+  completionPlaybackPass: null,
+  completionSaving: false,
+  completionCelebratedMaterialIds: new Set(),
   index: 0,
   revealed: false,
   loop: false,
   speed: 1,
   media: null,
+  mediaViewMode: MEDIA_VIEW_VISUAL,
   sentencePlayback: null,
   activeJobId: null,
   activeJobMaterialId: null,
@@ -53,14 +111,19 @@ const state = {
   drawerReturnFocus: null,
   paneRatio: loadPaneRatio(),
   paneResizePointerId: null,
-  askContext: null,
-  askAnswer: null,
-  askHistoryDirty: false,
-  askAnchorRect: null,
+  askThreads: new Map(),
+  activeAskThreadId: null,
+  askRailCollapsed: true,
+  askRailScrollTop: 0,
+  collapsedAskThreadIds: new Set(),
   askAnchorElement: null,
-  askReturnFocus: null,
-  askRequestId: 0,
   askRepositionFrame: null,
+  phraseGuideRequests: new Map(),
+  expandedPhraseGuideKeys: new Set(),
+  phraseExposureObserver: null,
+  phraseExposureTimers: new Map(),
+  phraseExposureRecorded: new Set(),
+  phraseExposurePending: new Set(),
   pronunciationButton: null,
   pronunciationUtterance: null,
   pronunciationTimer: null,
@@ -83,9 +146,18 @@ boot();
 async function boot() {
   applyLibraryRailState();
   bindEvents();
-  await Promise.all([loadSystemStatus(), loadMaterials(), loadLearnerProfile(), loadTrash().catch(() => {})]);
+  await Promise.all([
+    loadSystemStatus(),
+    loadAiSettings({ openWhenUnconfigured: true }),
+    loadMaterials(),
+    loadLearnerProfile(),
+    loadTrash().catch(() => {}),
+  ]);
+  normalizeStoredReviewScope();
+  renderGlobalStudyControls();
   const materialId = new URLSearchParams(location.search).get("material");
-  if (materialId) await openMaterial(materialId);
+  if (inReviewMode()) await enterReviewMode({ autoOpen: true, preferredMaterialId: materialId || "" });
+  else if (materialId) await openMaterial(materialId);
 }
 
 function bindEvents() {
@@ -121,8 +193,45 @@ function bindEvents() {
   });
   document.addEventListener("paste", handleFilePaste);
 
-  document.querySelectorAll("[data-speed]").forEach((button) => button.addEventListener("click", () => setSpeed(Number(button.dataset.speed))));
-  elements.reviewFilterButton.addEventListener("click", toggleReviewFilter);
+  elements.aiSettingsRailButton.addEventListener("click", () => openAiSettingsDialog({ onboarding: false }));
+  elements.closeAiSettingsButton.addEventListener("click", closeAiSettingsDialog);
+  elements.cancelAiSettingsButton.addEventListener("click", closeAiSettingsDialog);
+  elements.refreshAiSettingsButton.addEventListener("click", refreshAiSettings);
+  elements.testAiSettingsButton.addEventListener("click", testAiSettings);
+  elements.aiSettingsForm.addEventListener("submit", saveAiSettings);
+  elements.aiModelSelect.addEventListener("change", () => {
+    state.aiSettingsDraftModel = elements.aiModelSelect.value;
+    clearAiSettingsFeedback();
+    renderAiSettingsDialog();
+  });
+  document.querySelectorAll('[name="aiProvider"]').forEach((radio) => {
+    radio.addEventListener("change", () => selectAiProvider(radio.value));
+  });
+  elements.aiSettingsDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    if (state.aiSettingsDialogMode === "onboarding") {
+      const selectedProvider = document.querySelector('[name="aiProvider"]:checked');
+      (selectedProvider || document.querySelector('[name="aiProvider"]'))?.focus();
+      return;
+    }
+    closeAiSettingsDialog();
+  });
+
+  document.querySelectorAll("[data-media-view]").forEach((button) => {
+    button.addEventListener("click", () => setMediaViewMode(button.dataset.mediaView));
+  });
+  document.querySelectorAll("[data-study-mode]").forEach((button) => {
+    button.addEventListener("click", () => setGlobalStudyMode(button.dataset.studyMode));
+  });
+  document.querySelectorAll("[data-review-scope]").forEach((select) => {
+    select.addEventListener("change", () => setReviewScope(select.value));
+  });
+  elements.materialCompletionButton.addEventListener("click", () => toggleMaterialCompletion(state.material));
+  elements.closeCompletionCelebrationButton.addEventListener("click", closeCompletionCelebration);
+  elements.completionCelebration.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeCompletionCelebration();
+  });
   elements.segmentListButton.addEventListener("click", () => openSegmentDrawer());
   elements.closeSegmentDrawerButton.addEventListener("click", () => closeSegmentDrawer());
   elements.segmentDrawerScrim.addEventListener("click", () => closeSegmentDrawer());
@@ -149,10 +258,8 @@ function bindEvents() {
   elements.sentenceBreakdownList.addEventListener("pointerup", scheduleSelectionAction);
   elements.sentenceBreakdownList.addEventListener("keyup", scheduleSelectionAction);
   elements.selectionAskButton.addEventListener("click", askAboutSelection);
-  elements.closeAskPanelButton.addEventListener("click", () => closeAskPanel());
-  elements.askReturnToSourceButton.addEventListener("click", returnToAskSource);
-  elements.askSubmitButton.addEventListener("click", submitLearningQuestion);
-  elements.saveQaReviewButton.addEventListener("click", saveQaReview);
+  elements.closeAskPanelButton.addEventListener("click", collapseAskRail);
+  elements.askRailToggle.addEventListener("click", expandAskRail);
   elements.toastActionButton.addEventListener("click", runToastAction);
   elements.cancelDeleteMaterialButton.addEventListener("click", () => closeDeleteMaterialDialog());
   elements.confirmDeleteMaterialButton.addEventListener("click", confirmDeleteMaterial);
@@ -190,8 +297,6 @@ async function loadSystemStatus() {
     if (!tools.ffmpeg || !tools.ffprobe) missing.push("FFmpeg");
     if (!tools.whisper) missing.push("Whisper CLI");
     if (!tools.whisperModel) missing.push("Whisper 模型");
-    if (!tools.codex) missing.push("Codex CLI");
-    else if (!tools.codexLoggedIn) missing.push("Codex 登录");
     const larkReady = tools.lark && tools.larkUserReady;
     elements.systemStatus.classList.toggle("is-ready", missing.length === 0);
     elements.systemStatus.classList.toggle("has-warning", missing.length > 0);
@@ -206,10 +311,528 @@ async function loadSystemStatus() {
   }
 }
 
+async function loadAiSettings({ openWhenUnconfigured = false, preserveDraft = false } = {}) {
+  state.aiSettingsLoading = true;
+  state.aiSettingsLoadError = "";
+  renderAiSettingsRail();
+  renderAiSettingsDialog();
+  try {
+    const payload = await api("/api/ai-settings");
+    state.aiSettings = normalizeAiSettingsPayload(payload);
+    state.aiSettingsLoaded = true;
+    reconcileAiSettingsDraft({ preserveDraft });
+  } catch (error) {
+    state.aiSettingsLoaded = false;
+    state.aiSettingsLoadError = `无法读取本机 AI 状态：${error.message}。请确认本地服务仍在运行，然后重新检查。`;
+  } finally {
+    state.aiSettingsLoading = false;
+    renderAiSettingsRail();
+    renderAiSettingsDialog();
+  }
+  if (openWhenUnconfigured && (!state.aiSettingsLoaded || !state.aiSettings.settings.configured)) {
+    openAiSettingsDialog({ onboarding: true });
+  }
+  return state.aiSettingsLoaded;
+}
+
+function reconcileAiSettingsDraft({ preserveDraft = false } = {}) {
+  const configured = state.aiSettings.settings;
+  let provider = preserveDraft ? state.aiSettingsDraftProvider : "";
+  let model = preserveDraft ? state.aiSettingsDraftModel : "";
+  if (!AI_PROVIDER_IDS.includes(provider) && configured.configured) {
+    provider = configured.provider || "";
+    model = configured.model || "";
+  }
+  if (!AI_PROVIDER_IDS.includes(provider)) {
+    state.aiSettingsDraftProvider = "";
+    state.aiSettingsDraftModel = "";
+    return;
+  }
+  const models = state.aiSettings.providers[provider].models;
+  if (!models.some((item) => item.id === model)) {
+    const configuredModel = configured.provider === provider ? configured.model : "";
+    model = models.some((item) => item.id === configuredModel) ? configuredModel : models[0]?.id || "";
+  }
+  state.aiSettingsDraftProvider = provider;
+  state.aiSettingsDraftModel = model;
+}
+
+function openAiSettingsDialog({ onboarding = false } = {}) {
+  state.aiSettingsDialogMode = onboarding ? "onboarding" : "settings";
+  state.aiSettingsActionError = "";
+  state.aiSettingsTestMessage = "";
+  state.aiSettingsTestSucceeded = false;
+  if (!onboarding) reconcileAiSettingsDraft();
+  renderAiSettingsDialog();
+  if (!elements.aiSettingsDialog.open) elements.aiSettingsDialog.showModal();
+  requestAnimationFrame(() => {
+    const target = state.aiSettingsDraftProvider
+      ? document.querySelector(`[name="aiProvider"][value="${state.aiSettingsDraftProvider}"]`)
+      : document.querySelector('[name="aiProvider"]');
+    target?.focus();
+  });
+}
+
+function closeAiSettingsDialog() {
+  if (state.aiSettingsDialogMode === "onboarding" && !state.aiSettings.settings.configured) return;
+  if (elements.aiSettingsDialog.open) elements.aiSettingsDialog.close();
+  state.aiSettingsDialogMode = "settings";
+  state.aiSettingsActionError = "";
+  state.aiSettingsTestMessage = "";
+  state.aiSettingsTestSucceeded = false;
+}
+
+function selectAiProvider(provider) {
+  if (!AI_PROVIDER_IDS.includes(provider)) return;
+  state.aiSettingsDraftProvider = provider;
+  const models = state.aiSettings.providers[provider].models;
+  const configuredModel = state.aiSettings.settings.provider === provider ? state.aiSettings.settings.model : "";
+  const currentModel = state.aiSettingsDraftModel;
+  state.aiSettingsDraftModel = models.some((item) => item.id === currentModel)
+    ? currentModel
+    : models.some((item) => item.id === configuredModel)
+      ? configuredModel
+      : models[0]?.id || "";
+  clearAiSettingsFeedback();
+  renderAiSettingsDialog();
+}
+
+async function refreshAiSettings() {
+  if (state.aiSettingsLoading || state.aiSettingsSaving || state.aiSettingsTesting) return;
+  clearAiSettingsFeedback();
+  await loadAiSettings({ preserveDraft: true });
+}
+
+async function testAiSettings() {
+  if (state.aiSettingsTesting || state.aiSettingsSaving) return;
+  clearAiSettingsFeedback();
+  const provider = state.aiSettingsDraftProvider;
+  const model = state.aiSettingsDraftModel;
+  const problem = aiSelectionProblem(state.aiSettings, provider, model);
+  if (problem) {
+    state.aiSettingsActionError = problem;
+    renderAiSettingsDialog();
+    return;
+  }
+  state.aiSettingsTesting = true;
+  renderAiSettingsDialog();
+  try {
+    const payload = await api("/api/ai-settings/test", {
+      method: "POST",
+      body: { provider, model },
+    });
+    if (payload.ok === false) throw new Error(payload.error || payload.message || "连接测试失败");
+    state.aiSettingsTestSucceeded = true;
+    state.aiSettingsTestMessage = `${aiProviderLabel(provider)} / ${findAiModel(state.aiSettings, provider, model)?.label || model} 连接成功，可以保存。`;
+  } catch (error) {
+    state.aiSettingsTestSucceeded = false;
+    state.aiSettingsTestMessage = `连接失败：${error.message}。请检查本机安装与登录后重试。`;
+  } finally {
+    state.aiSettingsTesting = false;
+    renderAiSettingsDialog();
+  }
+}
+
+async function saveAiSettings(event) {
+  event.preventDefault();
+  if (state.aiSettingsSaving || state.aiSettingsTesting) return;
+  clearAiSettingsFeedback();
+  const provider = state.aiSettingsDraftProvider;
+  const model = state.aiSettingsDraftModel;
+  const problem = aiSelectionProblem(state.aiSettings, provider, model);
+  if (problem) {
+    state.aiSettingsActionError = problem;
+    renderAiSettingsDialog();
+    return;
+  }
+  state.aiSettingsSaving = true;
+  renderAiSettingsDialog();
+  try {
+    const payload = await api("/api/ai-settings", {
+      method: "PATCH",
+      body: { provider, model },
+    });
+    if (payload.ok === false) throw new Error(payload.error || payload.message || "保存失败");
+    const returnedSettings = payload.settings || {};
+    state.aiSettings = normalizeAiSettingsPayload({
+      settings: {
+        configured: true,
+        provider: returnedSettings.provider || provider,
+        model: returnedSettings.model || model,
+      },
+      providers: payload.providers || state.aiSettings.providers,
+    });
+    state.aiSettingsLoaded = true;
+    reconcileAiSettingsDraft();
+    state.aiSettingsDialogMode = "settings";
+    renderAiSettingsRail();
+    if (elements.aiSettingsDialog.open) elements.aiSettingsDialog.close();
+    showToast(`已切换到 ${aiProviderLabel(provider)} / ${findAiModel(state.aiSettings, provider, model)?.label || model}，只影响之后的新讲解`);
+  } catch (error) {
+    state.aiSettingsActionError = `保存失败：${error.message}。当前选择尚未生效，请检查后重试。`;
+  } finally {
+    state.aiSettingsSaving = false;
+    renderAiSettingsRail();
+    renderAiSettingsDialog();
+  }
+}
+
+function clearAiSettingsFeedback() {
+  state.aiSettingsActionError = "";
+  state.aiSettingsTestMessage = "";
+  state.aiSettingsTestSucceeded = false;
+}
+
+function renderAiSettingsRail() {
+  if (!elements.aiSettingsRailButton) return;
+  const label = state.aiSettingsLoading && !state.aiSettingsLoaded
+    ? "AI讲解 · 正在检查"
+    : state.aiSettingsLoadError
+      ? "AI讲解 · 无法检查"
+      : aiSettingsRailLabel(state.aiSettings);
+  const { provider, model, configured } = state.aiSettings.settings;
+  const ready = configured && isAiSelectionReady(state.aiSettings, provider, model);
+  elements.aiSettingsRailLabel.textContent = label;
+  elements.aiSettingsRailHint.textContent = ready
+    ? "已就绪 · 仅影响新任务"
+    : configured
+      ? "账户状态有变化，点击检查"
+      : "选择自己的 AI 账户";
+  elements.aiSettingsRailButton.classList.toggle("is-ready", ready);
+  elements.aiSettingsRailButton.classList.toggle("has-warning", !ready && !state.aiSettingsLoading);
+  elements.aiSettingsRailButton.setAttribute("aria-label", `${label}，打开设置`);
+  elements.aiSettingsRailButton.title = `${label}，打开设置`;
+}
+
+function renderAiSettingsDialog() {
+  if (!elements.aiSettingsDialog) return;
+  const onboarding = state.aiSettingsDialogMode === "onboarding" && !state.aiSettings.settings.configured;
+  elements.aiSettingsDialogTitle.textContent = onboarding ? "先选择 AI 讲解账户" : "AI 讲解设置";
+  elements.closeAiSettingsButton.classList.toggle("is-hidden", onboarding);
+  elements.cancelAiSettingsButton.classList.toggle("is-hidden", onboarding);
+  elements.cancelAiSettingsButton.textContent = "取消";
+  elements.aiProviderFieldset.disabled = state.aiSettingsLoading || state.aiSettingsSaving || state.aiSettingsTesting;
+  elements.refreshAiSettingsButton.disabled = state.aiSettingsLoading || state.aiSettingsSaving || state.aiSettingsTesting;
+  elements.refreshAiSettingsButton.textContent = state.aiSettingsLoading ? "正在检查…" : "重新检查";
+
+  for (const provider of AI_PROVIDER_IDS) {
+    const capability = state.aiSettings.providers[provider];
+    const radio = document.querySelector(`[name="aiProvider"][value="${provider}"]`);
+    const option = document.querySelector(`[data-ai-provider-option="${provider}"]`);
+    const badge = provider === "codex" ? elements.aiCodexStatus : elements.aiCursorStatus;
+    const selected = state.aiSettingsDraftProvider === provider;
+    if (radio) radio.checked = selected;
+    option?.classList.toggle("is-selected", selected);
+    option?.classList.toggle("is-ready", capability.installed && capability.authenticated && capability.models.length > 0);
+    const status = state.aiSettingsLoading && !state.aiSettingsLoaded
+      ? "检查中"
+      : !capability.installed
+        ? "未安装"
+        : !capability.authenticated
+          ? "未登录"
+          : capability.models.length
+            ? `已登录 · ${capability.models.length} 个模型`
+            : "未读取到模型";
+    badge.textContent = status;
+  }
+
+  renderAiAccountState();
+  renderAiModelOptions();
+
+  const selectionReady = isAiSelectionReady(
+    state.aiSettings,
+    state.aiSettingsDraftProvider,
+    state.aiSettingsDraftModel,
+  );
+  elements.testAiSettingsButton.disabled = !selectionReady || state.aiSettingsLoading || state.aiSettingsSaving || state.aiSettingsTesting;
+  elements.testAiSettingsButton.textContent = state.aiSettingsTesting ? "正在测试…" : "测试连接";
+  elements.saveAiSettingsButton.disabled = !selectionReady || state.aiSettingsLoading || state.aiSettingsSaving || state.aiSettingsTesting;
+  elements.saveAiSettingsButton.textContent = state.aiSettingsSaving ? "正在保存…" : onboarding ? "保存并开始" : "保存设置";
+
+  elements.aiSettingsLoadError.textContent = state.aiSettingsLoadError;
+  elements.aiSettingsLoadError.classList.toggle("is-hidden", !state.aiSettingsLoadError);
+  elements.aiSettingsError.textContent = state.aiSettingsActionError;
+  elements.aiSettingsError.classList.toggle("is-hidden", !state.aiSettingsActionError);
+  elements.aiSettingsTestResult.textContent = state.aiSettingsTestMessage;
+  elements.aiSettingsTestResult.classList.toggle("is-hidden", !state.aiSettingsTestMessage);
+  elements.aiSettingsTestResult.classList.toggle("is-success", state.aiSettingsTestSucceeded);
+  elements.aiSettingsTestResult.classList.toggle("is-error", Boolean(state.aiSettingsTestMessage) && !state.aiSettingsTestSucceeded);
+}
+
+function renderAiAccountState() {
+  const provider = state.aiSettingsDraftProvider;
+  if (!AI_PROVIDER_IDS.includes(provider)) {
+    elements.aiAccountStateMessage.textContent = "请选择 Codex 或 Cursor。应用只会使用这台电脑上已经安装并登录的账户。";
+    return;
+  }
+  const capability = state.aiSettings.providers[provider];
+  const label = aiProviderLabel(provider);
+  if (capability.error) {
+    elements.aiAccountStateMessage.textContent = `${capability.error} 请处理后点击“重新检查”。`;
+    return;
+  }
+  if (!capability.installed) {
+    elements.aiAccountStateMessage.textContent = `未找到 ${label} Agent CLI。请先完成本机安装，再点击“重新检查”。`;
+    return;
+  }
+  if (!capability.authenticated) {
+    elements.aiAccountStateMessage.textContent = `已找到 ${label} Agent CLI，但账号尚未登录。请先在本机完成登录，再点击“重新检查”。`;
+    return;
+  }
+  if (!capability.models.length) {
+    elements.aiAccountStateMessage.textContent = `${label} 已登录，但没有读取到可用模型。请点击“重新检查”；如果仍为空，请确认账户权限。`;
+    return;
+  }
+  elements.aiAccountStateMessage.textContent = `${label} 已安装并登录，已从当前账户读取 ${capability.models.length} 个可用模型。`;
+}
+
+function renderAiModelOptions() {
+  const provider = state.aiSettingsDraftProvider;
+  const capability = state.aiSettings.providers[provider];
+  const models = capability?.models || [];
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = provider ? "暂无可用模型" : "请先选择可用账户";
+  const fragment = document.createDocumentFragment();
+  fragment.append(placeholder);
+  for (const model of models) {
+    const option = document.createElement("option");
+    option.value = model.id;
+    option.textContent = model.label;
+    fragment.append(option);
+  }
+  elements.aiModelSelect.replaceChildren(fragment);
+  elements.aiModelSelect.value = models.some((item) => item.id === state.aiSettingsDraftModel)
+    ? state.aiSettingsDraftModel
+    : "";
+  elements.aiModelSelect.disabled = state.aiSettingsLoading
+    || state.aiSettingsSaving
+    || state.aiSettingsTesting
+    || !capability?.installed
+    || !capability?.authenticated
+    || !models.length;
+  const selectedModel = models.find((item) => item.id === elements.aiModelSelect.value);
+  const reasoning = selectedModel?.reasoningLevels?.length
+    ? ` 可用推理强度：${selectedModel.reasoningLevels.join("、")}。`
+    : "";
+  elements.aiModelDescription.textContent = selectedModel
+    ? `${selectedModel.description || "模型列表来自当前账户的本机 CLI。"}${reasoning}`
+    : "模型列表来自所选账户的本机 CLI，会随账号和版本动态更新。";
+}
+
 async function loadMaterials() {
   const payload = await api("/api/materials");
   state.materials = payload.materials;
+  normalizeStoredReviewScope();
+  renderGlobalStudyControls();
   renderMaterialList();
+}
+
+function inReviewMode() {
+  return state.studyPreferences.mode === STUDY_MODE_REVIEW;
+}
+
+function normalizeStoredReviewScope() {
+  const scope = state.studyPreferences.reviewScope;
+  if (scope.kind !== "material") return;
+  if (state.materials.some((material) => material.id === scope.materialId)) return;
+  state.studyPreferences = saveStudyPreferences(globalThis.localStorage, updateStudyPreferences(state.studyPreferences, {
+    type: "set-review-scope",
+    scope: { kind: "all" },
+  }));
+  commitReviewStudyState();
+}
+
+function commitReviewStudyState() {
+  state.committedStudyPreferences = state.studyPreferences;
+  state.committedReviewQueue = [...state.reviewQueue];
+  state.committedReviewQueueIndex = state.reviewQueueIndex;
+}
+
+function restoreCommittedReviewStudyState() {
+  state.studyPreferences = saveStudyPreferences(globalThis.localStorage, state.committedStudyPreferences);
+  state.reviewQueue = [...state.committedReviewQueue];
+  state.reviewQueueIndex = Math.min(
+    Math.max(0, state.committedReviewQueueIndex),
+    Math.max(0, state.reviewQueue.length - 1),
+  );
+  state.reviewOnly = inReviewMode();
+  renderGlobalStudyControls();
+}
+
+function renderGlobalStudyControls() {
+  const reviewMode = inReviewMode();
+  document.querySelectorAll("[data-study-mode]").forEach((button) => {
+    const active = button.dataset.studyMode === state.studyPreferences.mode;
+    button.setAttribute("aria-pressed", String(active));
+    button.classList.toggle("is-active", active);
+  });
+  const readyMaterials = orderedMaterials().filter((material) => material.status === "ready");
+  document.querySelectorAll(".review-scope-control").forEach((control) => {
+    control.classList.toggle("is-hidden", !reviewMode);
+  });
+  document.querySelectorAll("[data-review-scope]").forEach((select) => {
+    const selectedValue = state.studyPreferences.reviewScope.kind === "material"
+      ? state.studyPreferences.reviewScope.materialId
+      : "all";
+    const fragment = document.createDocumentFragment();
+    const allOption = document.createElement("option");
+    allOption.value = "all";
+    allOption.textContent = "全部材料";
+    fragment.append(allOption);
+    readyMaterials.forEach((material) => {
+      const option = document.createElement("option");
+      option.value = material.id;
+      option.textContent = material.title;
+      fragment.append(option);
+    });
+    select.replaceChildren(fragment);
+    select.value = readyMaterials.some((material) => material.id === selectedValue) ? selectedValue : "all";
+    select.disabled = state.reviewQueueLoading;
+  });
+  state.reviewOnly = reviewMode;
+}
+
+async function setGlobalStudyMode(mode) {
+  if (![STUDY_MODE_INTENSIVE, STUDY_MODE_REVIEW].includes(mode)) return;
+  if (state.studyPreferences.mode === mode) return;
+  const preferenceOperationId = ++state.studyPreferenceOperationId;
+  state.reviewQueueRequestId += 1;
+  state.reviewActivationRequestId += 1;
+  state.materialOpenRequestId += 1;
+  pauseMedia();
+  state.completionPlaybackPass = null;
+  const requestedPreferences = saveStudyPreferences(globalThis.localStorage, updateStudyPreferences(state.studyPreferences, {
+    type: "set-mode",
+    mode,
+  }));
+  state.studyPreferences = requestedPreferences;
+  renderGlobalStudyControls();
+  if (mode === STUDY_MODE_REVIEW) {
+    const switched = await enterReviewMode({ autoOpen: true, preferredMaterialId: state.material?.id });
+    if (preferenceOperationId !== state.studyPreferenceOperationId) return;
+    if (!switched && inReviewMode() && state.studyPreferences === requestedPreferences) {
+      restoreCommittedReviewStudyState();
+      if (state.material) renderTraining();
+    }
+    return;
+  }
+  state.reviewOnly = false;
+  state.reviewQueue = [];
+  state.reviewQueueIndex = 0;
+  commitReviewStudyState();
+  if (!state.material) return;
+  state.index = resolveLatestStudyIndex(
+    state.material[DEFAULT_STUDY_MODE] || [],
+    state.material.progress || {},
+    loadStudyPosition(DEFAULT_STUDY_MODE),
+  );
+  state.revealed = false;
+  renderTraining();
+  if (elements.segmentDrawer.classList.contains("is-open")) renderSegmentDirectory();
+  requestAnimationFrame(() => scrollTrainingWorkspaceToTop());
+  showToast("已切换到精听模式");
+}
+
+async function setReviewScope(value) {
+  const preferenceOperationId = ++state.studyPreferenceOperationId;
+  const scope = value && value !== "all" ? { kind: "material", materialId: value } : { kind: "all" };
+  const requestedPreferences = saveStudyPreferences(globalThis.localStorage, updateStudyPreferences(state.studyPreferences, {
+    type: "set-review-scope",
+    scope,
+  }));
+  state.studyPreferences = requestedPreferences;
+  renderGlobalStudyControls();
+  if (!inReviewMode()) return;
+  const changed = await enterReviewMode({ autoOpen: true, preferredMaterialId: value === "all" ? state.material?.id : value });
+  if (preferenceOperationId !== state.studyPreferenceOperationId) return;
+  if (!changed && state.studyPreferences === requestedPreferences) {
+    restoreCommittedReviewStudyState();
+  }
+}
+
+async function refreshReviewQueue({ preferredKey = "", preferredMaterialId = "" } = {}) {
+  const requestId = ++state.reviewQueueRequestId;
+  state.reviewQueueLoading = true;
+  renderGlobalStudyControls();
+  try {
+    const scope = state.studyPreferences.reviewScope;
+    const query = scope.kind === "material" ? `?materialId=${encodeURIComponent(scope.materialId)}` : "";
+    const payload = await api(`/api/review-queue${query}`);
+    if (requestId !== state.reviewQueueRequestId) return false;
+    state.reviewQueue = Array.isArray(payload.items) ? payload.items : [];
+    let index = preferredKey ? state.reviewQueue.findIndex((item) => item.key === preferredKey) : -1;
+    if (index < 0 && preferredMaterialId) index = state.reviewQueue.findIndex((item) => item.materialId === preferredMaterialId);
+    state.reviewQueueIndex = index >= 0 ? index : Math.min(state.reviewQueueIndex, Math.max(0, state.reviewQueue.length - 1));
+    return true;
+  } catch (error) {
+    if (requestId === state.reviewQueueRequestId) showToast(`复习内容读取失败：${error.message}`);
+    return false;
+  } finally {
+    if (requestId === state.reviewQueueRequestId) {
+      state.reviewQueueLoading = false;
+      renderGlobalStudyControls();
+    }
+  }
+}
+
+async function enterReviewMode({ autoOpen = false, preferredMaterialId = "" } = {}) {
+  state.reviewOnly = true;
+  const currentKey = currentReviewQueueItem()?.key || "";
+  const refreshed = await refreshReviewQueue({ preferredKey: currentKey, preferredMaterialId });
+  if (!refreshed || !inReviewMode()) return false;
+  if (!state.reviewQueue.length) {
+    if (state.material) {
+      state.revealed = false;
+      renderCurrentUnit();
+    }
+    showToast(state.studyPreferences.reviewScope.kind === "material" ? "这份材料还没有加入复习的内容" : "还没有加入复习的内容");
+    commitReviewStudyState();
+    return true;
+  }
+  if (autoOpen || state.material) {
+    const activated = await activateReviewQueueIndex(state.reviewQueueIndex, { autoplay: false, resetScroll: true });
+    if (!activated || !inReviewMode()) return false;
+  }
+  showToast("已切换到复习模式");
+  return true;
+}
+
+function currentReviewQueueItem() {
+  if (!inReviewMode() || !state.reviewQueue.length) return null;
+  state.reviewQueueIndex = Math.min(Math.max(0, state.reviewQueueIndex), state.reviewQueue.length - 1);
+  return state.reviewQueue[state.reviewQueueIndex] || null;
+}
+
+async function activateReviewQueueIndex(index, { autoplay = false, resetScroll = true } = {}) {
+  if (!inReviewMode() || !state.reviewQueue.length) return false;
+  const activationRequestId = ++state.reviewActivationRequestId;
+  const nextIndex = Math.min(Math.max(0, index), state.reviewQueue.length - 1);
+  const item = state.reviewQueue[nextIndex];
+  if (state.material?.id !== item.materialId) {
+    const opened = await openMaterial(item.materialId, {
+      preserveReviewScope: true,
+      skipReviewQueueLoad: true,
+      reviewQueueIndex: nextIndex,
+      preserveSegmentDrawerState: true,
+      deferReviewStateCommit: true,
+    });
+    if (!opened || activationRequestId !== state.reviewActivationRequestId || !inReviewMode()) {
+      return false;
+    }
+  } else {
+    if (activationRequestId !== state.reviewActivationRequestId || !inReviewMode()) return false;
+    state.reviewQueueIndex = nextIndex;
+    state.index = Math.max(0, state.material.paragraphs.findIndex((paragraph) => paragraph.id === item.paragraphId));
+    state.revealed = false;
+    renderTraining();
+    if (elements.segmentDrawer.classList.contains("is-open")) renderSegmentDirectory();
+  }
+  if (activationRequestId !== state.reviewActivationRequestId || !inReviewMode()) return false;
+  commitReviewStudyState();
+  if (resetScroll) requestAnimationFrame(() => scrollTrainingWorkspaceToTop());
+  if (autoplay) playUnitFromStart();
+  return true;
 }
 
 async function loadTrash() {
@@ -347,7 +970,10 @@ function renderMaterialList() {
       ? `${formatDuration(material.duration)} · ${material.paragraphCount} 个自然分段 · ${material.reviewCount} 待复习`
       : material.stage;
     if (material.status !== "ready") meta.classList.add("material-state");
-    button.append(title, meta);
+    button.append(title);
+    const summary = document.createElement("div");
+    summary.className = "material-item-summary";
+    summary.append(meta);
     if (material.status === "ready") {
       const progress = document.createElement("span");
       progress.className = "material-study-progress";
@@ -364,7 +990,7 @@ function renderMaterialList() {
       fill.style.transform = `scaleX(${Math.max(0, Math.min(100, material.progressPercent)) / 100})`;
       track.append(fill);
       progress.append(progressMeta, track);
-      button.append(progress);
+      summary.append(progress);
     }
     const titleEditor = document.createElement("input");
     titleEditor.type = "text";
@@ -416,6 +1042,7 @@ function renderMaterialList() {
           elements.materialTitle.textContent = payload.material.title;
         }
         renderMaterialList();
+        renderGlobalStudyControls();
         showToast("材料标题已更新");
       } catch (error) {
         renameSaving = false;
@@ -465,6 +1092,16 @@ function renderMaterialList() {
 
     const controls = document.createElement("div");
     controls.className = "material-item-controls";
+    const completionButton = document.createElement("button");
+    completionButton.type = "button";
+    completionButton.className = "material-completion-toggle";
+    completionButton.setAttribute("aria-pressed", String(material.completed === true));
+    completionButton.setAttribute("aria-label", material.completed === true
+      ? `将材料标记为未学完：${material.title}`
+      : `将材料标记为已学完：${material.title}`);
+    completionButton.title = material.completed === true ? "改为未学完" : "标记已学完";
+    completionButton.textContent = material.completed === true ? "已学完" : "未学完";
+    completionButton.addEventListener("click", () => toggleMaterialCompletion(material));
     const pinButton = document.createElement("button");
     pinButton.type = "button";
     pinButton.className = "material-pin-button";
@@ -492,9 +1129,12 @@ function renderMaterialList() {
     dragHandle.addEventListener("keydown", (event) => handleMaterialOrderKeyboard(event, material.id));
     dragHandle.addEventListener("dragstart", (event) => startMaterialDrag(event, material.id));
     dragHandle.addEventListener("dragend", finishMaterialDrag);
-    controls.append(pinButton, deleteButton, dragHandle);
+    controls.append(completionButton, pinButton, deleteButton, dragHandle);
 
-    item.append(button, titleEditor, controls);
+    item.append(button, titleEditor, summary, controls);
+    summary.addEventListener("click", () => {
+      if (!item.classList.contains("is-renaming")) openMaterial(material.id);
+    });
     item.addEventListener("dragover", (event) => updateMaterialDropTarget(event, material.id, item));
     item.addEventListener("dragleave", (event) => {
       if (!item.contains(event.relatedTarget)) item.classList.remove("is-drop-before", "is-drop-after");
@@ -535,6 +1175,9 @@ function setDeleteMaterialDialogBusy(busy) {
 async function confirmDeleteMaterial() {
   const materialId = state.pendingDeleteMaterialId;
   if (!materialId) return;
+  const reviewModeAtDelete = inReviewMode();
+  const previousReviewKey = currentReviewQueueItem()?.key || "";
+  const previousReviewIndex = state.reviewQueueIndex;
   setDeleteMaterialDialogBusy(true);
   elements.deleteMaterialError.classList.add("is-hidden");
   let payload;
@@ -549,6 +1192,8 @@ async function confirmDeleteMaterial() {
 
   stopClientJobTrackingForMaterial(materialId);
   state.materials = state.materials.filter((material) => material.id !== materialId);
+  normalizeStoredReviewScope();
+  renderGlobalStudyControls();
   if (payload.trashEntry) {
     state.trash = [payload.trashEntry, ...state.trash.filter((entry) => entry.id !== materialId)];
     renderTrash();
@@ -557,6 +1202,24 @@ async function confirmDeleteMaterial() {
   closeDeleteMaterialDialog(false);
   if (deletedCurrentMaterial) showHome();
   else renderMaterialList();
+  if (reviewModeAtDelete) {
+    const refreshed = await refreshReviewQueue({
+      preferredKey: previousReviewKey,
+      preferredMaterialId: deletedCurrentMaterial ? "" : state.material?.id || "",
+    });
+    if (refreshed && state.reviewQueue.length) {
+      const preservedIndex = previousReviewKey
+        ? state.reviewQueue.findIndex((item) => item.key === previousReviewKey)
+        : -1;
+      const targetIndex = preservedIndex >= 0
+        ? preservedIndex
+        : Math.min(Math.max(0, previousReviewIndex), state.reviewQueue.length - 1);
+      await activateReviewQueueIndex(targetIndex, { autoplay: false, resetScroll: false });
+    } else if (refreshed) {
+      commitReviewStudyState();
+      if (state.material) renderCurrentUnit();
+    }
+  }
   showToast("已移入垃圾桶，30 天内可以恢复", {
     label: "撤销",
     onAction: () => restoreTrashMaterial(materialId),
@@ -856,11 +1519,45 @@ function setImportBusy(busy) {
   elements.dropZone.setAttribute("aria-disabled", String(busy));
 }
 
-async function openMaterial(id) {
+async function openMaterial(id, options = {}) {
+  const openRequestId = ++state.materialOpenRequestId;
+  clearPhraseExposureTracking();
+  const previousMaterial = state.material;
+  const askRailWasCollapsed = state.askRailCollapsed;
+  const askRailWasVisible = !elements.askPanel.classList.contains("is-hidden")
+    || !elements.askRailToggle.classList.contains("is-hidden");
   pauseMedia();
-  closeAskPanel(false);
+  state.completionPlaybackPass = null;
+  hideAskRail();
+  const segmentDrawerWasOpen = elements.segmentDrawer.classList.contains("is-open");
   closeSegmentDrawer(false);
-  const payload = await api(`/api/materials/${id}`);
+  if (inReviewMode() && !options.skipReviewQueueLoad) {
+    const refreshed = await refreshReviewQueue({ preferredMaterialId: id });
+    if (!refreshed || openRequestId !== state.materialOpenRequestId) {
+      restoreMaterialOpenUiAfterFailure({ openRequestId, previousMaterial, askRailWasCollapsed, askRailWasVisible, segmentDrawerWasOpen });
+      return false;
+    }
+  }
+
+  let targetMaterialId = id;
+  let reviewQueueIndex = Number.isInteger(options.reviewQueueIndex) ? options.reviewQueueIndex : -1;
+  if (inReviewMode() && state.reviewQueue.length) {
+    if (reviewQueueIndex < 0) reviewQueueIndex = state.reviewQueue.findIndex((item) => item.materialId === id);
+    if (reviewQueueIndex < 0) reviewQueueIndex = Math.min(Math.max(0, state.reviewQueueIndex), state.reviewQueue.length - 1);
+    targetMaterialId = state.reviewQueue[reviewQueueIndex]?.materialId || id;
+  }
+
+  let payload;
+  try {
+    payload = await api(`/api/materials/${targetMaterialId}`);
+  } catch (error) {
+    if (openRequestId === state.materialOpenRequestId) {
+      restoreMaterialOpenUiAfterFailure({ openRequestId, previousMaterial, askRailWasCollapsed, askRailWasVisible, segmentDrawerWasOpen });
+      showToast(`材料读取失败：${error.message}`);
+    }
+    return false;
+  }
+  if (openRequestId !== state.materialOpenRequestId) return false;
   state.material = payload.material;
   if (state.material.status !== "ready" || !state.material.sentences.length) {
     showHome();
@@ -868,36 +1565,67 @@ async function openMaterial(id) {
     return;
   }
   state.loop = false;
+  state.mediaViewMode = loadMaterialMediaView(state.material);
   renderLoopState();
   state.revealed = false;
   state.mode = DEFAULT_STUDY_MODE;
-  state.reviewOnly = false;
-  state.index = resolveLatestStudyIndex(
-    state.material[DEFAULT_STUDY_MODE] || [],
-    state.material.progress || {},
-    loadStudyPosition(DEFAULT_STUDY_MODE),
-  );
+  state.reviewOnly = inReviewMode();
+  if (inReviewMode()) {
+    if (reviewQueueIndex < 0) reviewQueueIndex = state.reviewQueue.findIndex((item) => item.materialId === targetMaterialId);
+    state.reviewQueueIndex = reviewQueueIndex >= 0 ? reviewQueueIndex : 0;
+    const reviewItem = currentReviewQueueItem();
+    state.index = Math.max(0, state.material.paragraphs.findIndex((paragraph) => paragraph.id === reviewItem?.paragraphId));
+  } else {
+    state.index = resolveLatestStudyIndex(
+      state.material[DEFAULT_STUDY_MODE] || [],
+      state.material.progress || {},
+      loadStudyPosition(DEFAULT_STUDY_MODE),
+    );
+  }
   state.heardSaving.clear();
-  elements.reviewFilterButton.setAttribute("aria-pressed", "false");
   elements.homeView.classList.add("is-hidden");
   elements.trainingView.classList.remove("is-hidden");
   document.body.classList.add("is-training");
-  history.replaceState(null, "", `?material=${encodeURIComponent(id)}`);
+  history.replaceState(null, "", `?material=${encodeURIComponent(targetMaterialId)}`);
   renderMaterialList();
+  renderGlobalStudyControls();
   setupMedia();
   renderTraining();
-  applyInitialSegmentDrawerState();
+  if (!options.preserveSegmentDrawerState || segmentDrawerWasOpen) applyInitialSegmentDrawerState();
   scheduleAnalysisStatusPoll();
+  if (inReviewMode() && !options.deferReviewStateCommit) commitReviewStudyState();
   requestAnimationFrame(() => {
     applyPaneRatio(state.paneRatio);
     scrollTrainingWorkspaceToTop();
   });
+  return true;
+}
+
+function restoreMaterialOpenUiAfterFailure({
+  openRequestId,
+  previousMaterial,
+  askRailWasCollapsed,
+  askRailWasVisible,
+  segmentDrawerWasOpen,
+}) {
+  if (openRequestId !== state.materialOpenRequestId || state.material !== previousMaterial || !previousMaterial) return;
+  state.askRailCollapsed = askRailWasCollapsed;
+  if (askRailWasVisible) renderAskRail({ preserveScroll: true });
+  if (segmentDrawerWasOpen) openSegmentDrawer({ focus: false });
 }
 
 function showHome() {
+  state.committedStudyPreferences = state.studyPreferences;
+  state.committedReviewQueue = [];
+  state.committedReviewQueueIndex = 0;
+  state.studyPreferenceOperationId += 1;
+  state.reviewQueueRequestId += 1;
+  state.reviewActivationRequestId += 1;
+  state.materialOpenRequestId += 1;
   clearTimeout(state.analysisPollTimer);
   state.analysisPollTimer = null;
-  closeAskPanel(false);
+  clearPhraseExposureTracking();
+  hideAskRail();
   closeSegmentDrawer(false);
   disposeMedia();
   document.body.classList.remove("is-training");
@@ -905,7 +1633,9 @@ function showHome() {
   elements.homeView.classList.remove("is-hidden");
   history.replaceState(null, "", location.pathname);
   state.material = null;
+  state.completionPlaybackPass = null;
   renderMaterialList();
+  renderGlobalStudyControls();
 }
 
 function setupMedia() {
@@ -918,6 +1648,7 @@ function setupMedia() {
   media.playsInline = true;
   media.playbackRate = state.speed;
   media.addEventListener("timeupdate", handleMediaTimeUpdate);
+  media.addEventListener("ended", () => enforceUnitBoundary(true));
   media.addEventListener("loadedmetadata", updateUnitPlaybackProgress);
   media.addEventListener("seeked", updateUnitPlaybackProgress);
   media.addEventListener("play", () => { elements.playButton.textContent = "暂停"; });
@@ -941,11 +1672,172 @@ function renderTraining() {
   const showAnalysisAction = material.analysisStatus === "failed" || needsSpokenFormRefresh;
   elements.analysisRetry.classList.toggle("is-hidden", !showAnalysisAction);
   elements.analysisRetry.querySelector("span").textContent = material.analysisStatus === "failed"
-    ? "Codex 讲解尚未生成，但原声精听可以继续。"
+    ? "AI 讲解尚未生成，但原声精听可以继续。"
     : "这份旧材料还没有口语结构说明，可以补充生成。";
   elements.retryAnalysisButton.textContent = material.analysisStatus === "failed" ? "重新生成讲解" : "补充口语结构说明";
+  renderMaterialCompletionState();
+  renderMediaViewState();
+  renderGlobalStudyControls();
   renderCurrentUnit();
   updateResumeButton();
+  renderAskRail({ preserveScroll: true });
+}
+
+function materialHasVisualMedia(material = state.material) {
+  return material?.media?.kind === "video";
+}
+
+function mediaViewStorageKey(materialId) {
+  return `${MEDIA_VIEW_STORAGE_PREFIX}:${materialId}`;
+}
+
+function loadMaterialMediaView(material) {
+  if (!materialHasVisualMedia(material)) return MEDIA_VIEW_LISTEN;
+  try {
+    return localStorage.getItem(mediaViewStorageKey(material.id)) === MEDIA_VIEW_LISTEN
+      ? MEDIA_VIEW_LISTEN
+      : MEDIA_VIEW_VISUAL;
+  } catch {
+    return MEDIA_VIEW_VISUAL;
+  }
+}
+
+function renderMediaViewState() {
+  const hasVisualMedia = materialHasVisualMedia();
+  const listenOnly = !hasVisualMedia || state.mediaViewMode === MEDIA_VIEW_LISTEN;
+  state.mediaViewMode = listenOnly ? MEDIA_VIEW_LISTEN : MEDIA_VIEW_VISUAL;
+  elements.trainingView.dataset.mediaView = state.mediaViewMode;
+  elements.trainingView.classList.toggle("is-listen-only", listenOnly);
+  const progressSlot = listenOnly ? elements.listenOnlyProgressSlot : elements.practiceProgressSlot;
+  if (elements.practiceProgress.parentElement !== progressSlot) progressSlot.append(elements.practiceProgress);
+  elements.mediaViewSwitch.classList.toggle("is-hidden", !hasVisualMedia);
+  elements.mediaViewSwitch.querySelectorAll("[data-media-view]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.mediaView === state.mediaViewMode));
+  });
+  elements.mediaStage.setAttribute("aria-hidden", String(listenOnly));
+  elements.mediaColumn.setAttribute("aria-label", listenOnly ? "当前片段音频播放控制" : "原始录屏与播放控制");
+  elements.paneResizer.inert = listenOnly;
+  elements.segmentListButton.classList.toggle("is-hidden", listenOnly);
+  elements.overviewBlock.classList.toggle("is-hidden", listenOnly || !state.material?.overview?.summaryZh);
+  if (listenOnly && elements.segmentDrawer.classList.contains("is-open")) closeSegmentDrawer(false);
+}
+
+function setMediaViewMode(requestedMode) {
+  if (!state.material) return;
+  const hasVisualMedia = materialHasVisualMedia();
+  const nextMode = hasVisualMedia && requestedMode === MEDIA_VIEW_VISUAL
+    ? MEDIA_VIEW_VISUAL
+    : MEDIA_VIEW_LISTEN;
+  if (state.mediaViewMode === nextMode) return;
+  const practiceScrollTop = elements.practiceColumn?.scrollTop || 0;
+  const windowScrollY = window.scrollY;
+  state.mediaViewMode = nextMode;
+  if (hasVisualMedia) {
+    try {
+      localStorage.setItem(mediaViewStorageKey(state.material.id), nextMode);
+    } catch {
+      // The layout still changes for this visit when storage is unavailable.
+    }
+  }
+  renderMediaViewState();
+  requestAnimationFrame(() => {
+    applyPaneRatio(state.paneRatio);
+    if (window.matchMedia("(min-width: 1061px)").matches) {
+      elements.practiceColumn.scrollTop = practiceScrollTop;
+    } else {
+      window.scrollTo({ top: windowScrollY, behavior: "auto" });
+    }
+  });
+  showToast(nextMode === MEDIA_VIEW_LISTEN
+    ? "已切换到纯听，画面已隐藏，原声继续播放"
+    : "已切换到有画面");
+}
+
+function renderMaterialCompletionState() {
+  const completed = state.material?.completed === true;
+  elements.materialCompletionButton.setAttribute("aria-pressed", String(completed));
+  elements.materialCompletionButton.textContent = completed ? "✓ 已学完 · 改为未学完" : "标记已学完";
+  elements.materialCompletionButton.title = completed ? "手动改回未学完后，需要重新完整听完最后一段才会自动完成" : "手动把这份材料标记为已学完";
+}
+
+async function toggleMaterialCompletion(material) {
+  if (!material?.id || state.completionSaving) return;
+  const completed = material.completed !== true;
+  if (!completed) {
+    pauseMedia();
+    state.completionPlaybackPass = null;
+  }
+  state.completionSaving = true;
+  if (state.material?.id === material.id) elements.materialCompletionButton.disabled = true;
+  try {
+    const payload = await api(`/api/materials/${material.id}/learning-state`, {
+      method: "PATCH",
+      body: { completed },
+    });
+    applyMaterialLearningState(material.id, payload.material);
+    if (completed) {
+      clearCompletionResetAt(material.id);
+    } else {
+      saveCompletionResetAt(material.id, new Date().toISOString());
+      state.completionCelebratedMaterialIds.delete(material.id);
+    }
+    renderMaterialList();
+    if (state.material?.id === material.id) renderMaterialCompletionState();
+    showToast(completed ? "已标记为学完" : "已改为未学完；完整重播最后一段后会再次自动完成");
+  } catch (error) {
+    showToast(`状态保存失败：${error.message}`);
+  } finally {
+    state.completionSaving = false;
+    if (state.material?.id === material.id) elements.materialCompletionButton.disabled = false;
+  }
+}
+
+function applyMaterialLearningState(materialId, summary) {
+  const completed = summary?.completed === true;
+  const completedAt = completed ? summary?.completedAt || new Date().toISOString() : null;
+  state.materials = state.materials.map((material) => material.id === materialId
+    ? { ...material, completed, completedAt }
+    : material);
+  if (state.material?.id === materialId) {
+    state.material.completed = completed;
+    state.material.completedAt = completedAt;
+  }
+  state.reviewQueue = state.reviewQueue.map((item) => item.materialId === materialId
+    ? { ...item, materialCompleted: completed, materialCompletedAt: completedAt }
+    : item);
+}
+
+function completionResetKey(materialId) {
+  return `meeting-listening-completion-reset:${materialId}`;
+}
+
+function loadCompletionResetAt(materialId) {
+  try {
+    const value = localStorage.getItem(completionResetKey(materialId));
+    return value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveCompletionResetAt(materialId, timestamp) {
+  try { localStorage.setItem(completionResetKey(materialId), timestamp); } catch { /* Reset replay guard remains active for this visit through the current pass. */ }
+}
+
+function clearCompletionResetAt(materialId) {
+  try { localStorage.removeItem(completionResetKey(materialId)); } catch { /* Optional local replay guard. */ }
+}
+
+function showCompletionCelebration({ materialId, title }) {
+  if (!materialId || state.material?.id !== materialId || state.completionCelebratedMaterialIds.has(materialId)) return;
+  state.completionCelebratedMaterialIds.add(materialId);
+  elements.completionCelebrationTitle.textContent = `恭喜你，“${title || state.material.title}”已经学完啦！`;
+  if (!elements.completionCelebration.open) elements.completionCelebration.showModal();
+  requestAnimationFrame(() => elements.closeCompletionCelebrationButton.focus());
+}
+
+function closeCompletionCelebration() {
+  if (elements.completionCelebration.open) elements.completionCelebration.close();
 }
 
 function paneMetrics() {
@@ -1058,12 +1950,15 @@ function savePaneRatio(value) {
 
 function currentUnits() {
   const units = state.material?.paragraphs || [];
-  if (!state.reviewOnly) return units;
-  return units.filter((unit) => paragraphContainsReview(unit));
+  if (!inReviewMode()) return units;
+  const paragraphIds = new Set(state.reviewQueue
+    .filter((item) => item.materialId === state.material?.id)
+    .map((item) => item.paragraphId));
+  return units.filter((unit) => paragraphIds.has(unit.id));
 }
 
-function reviewItems() {
-  return state.material?.reviewItems || [];
+function reviewItems(material = state.material) {
+  return material?.reviewItems || [];
 }
 
 function sentenceNeedsReview(sentenceId) {
@@ -1082,6 +1977,11 @@ function unitNeedsReview(unit) {
 }
 
 function currentUnit() {
+  if (inReviewMode()) {
+    const item = currentReviewQueueItem();
+    if (!item || item.materialId !== state.material?.id) return null;
+    return state.material.paragraphs.find((paragraph) => paragraph.id === item.paragraphId) || null;
+  }
   const units = currentUnits();
   if (!units.length) return null;
   state.index = Math.min(Math.max(0, state.index), units.length - 1);
@@ -1135,12 +2035,13 @@ function renderCurrentUnit() {
   const unit = currentUnit();
   stopPronunciation();
   if (!unit) {
+    clearPhraseExposureTracking();
     pauseMedia();
     elements.segmentContinuation.classList.add("is-hidden");
     updateUnitPlaybackProgress();
-    elements.unitCounter.textContent = "没有需复习的片段";
-    elements.studyProgress.style.width = "0%";
-    showToast("当前没有标记为需复习的片段");
+    renderPracticeProgress(0, 0);
+    renderAskRail({ preserveScroll: true });
+    if (inReviewMode() && !state.reviewQueueLoading) showToast("当前范围没有标记为需复习的片段");
     return;
   }
 
@@ -1151,10 +2052,12 @@ function renderCurrentUnit() {
 
   pauseMedia();
   state.playbackPassEligible = false;
+  state.completionPlaybackPass = null;
   const playbackRange = currentPlaybackRange(unit);
   if (state.media?.readyState >= 1) state.media.currentTime = Math.max(0, playbackRange.start - 0.08);
-  elements.unitCounter.textContent = `${state.index + 1} / ${units.length}`;
-  elements.studyProgress.style.width = `${((state.index + 1) / units.length) * 100}%`;
+  const sequencePosition = inReviewMode() ? state.reviewQueueIndex + 1 : state.index + 1;
+  const sequenceLength = inReviewMode() ? state.reviewQueue.length : units.length;
+  renderPracticeProgress(sequencePosition, sequenceLength);
   elements.unitSpeaker.textContent = unit.speaker || "Speaker";
   elements.unitTime.textContent = playbackRange.contextKind === "lead-in"
     ? `${formatClock(playbackRange.start)} – ${formatClock(playbackRange.end)} · 正文 ${formatClock(playbackRange.contentStart)} 起`
@@ -1170,7 +2073,7 @@ function renderCurrentUnit() {
   elements.markReviewButton.classList.toggle("is-selected", Boolean(savedParagraphReview));
   elements.markReviewButton.setAttribute("aria-pressed", String(Boolean(savedParagraphReview)));
   elements.markReviewLabel.textContent = savedParagraphReview ? "已加入本段复习" : "加入本段复习";
-  elements.markReviewHint.textContent = savedParagraphReview ? "会出现在「只听需复习」中" : "需要再听时点这里";
+  elements.markReviewHint.textContent = savedParagraphReview ? "会出现在复习模式中" : "需要再听时点这里";
   renderSegmentContinuation(unit, units);
   hideSelectionAction();
   elements.sentenceContext.classList.add("is-hidden");
@@ -1178,14 +2081,15 @@ function renderCurrentUnit() {
   renderDiff(elements.dictationInput.value, unit.text);
   updateUnitPlaybackProgress();
   if (elements.segmentDrawer.classList.contains("is-open")) renderSegmentDirectory();
+  renderAskRail({ preserveScroll: true });
   scheduleAskPanelReposition();
 }
 
 function renderAnalysis(unit) {
   const sentenceItems = unit.sentenceIds
     .map((id) => state.material.sentences.find((sentence) => sentence.id === id));
-  const analysisProgressText = state.material.analysisStatus === "processing"
-    ? `${state.material.stage || "Codex 正在生成讲解"}。原声和逐字稿已经可以练习，生成完成后这里会自动更新。`
+  const analysisProgressText = ["pending", "processing"].includes(state.material.analysisStatus)
+    ? `${state.material.stage || "所选 AI 正在生成讲解"}。原声和逐字稿已经可以练习，生成完成后这里会自动更新。`
     : "这处暂时没有生成讲解。";
   const fragment = document.createDocumentFragment();
   sentenceItems.forEach((sentence, index) => {
@@ -1224,6 +2128,8 @@ function renderAnalysis(unit) {
       }
     });
   elements.sentenceBreakdownList.replaceChildren(fragment);
+  renderAskTextAnchors();
+  schedulePhraseExposureTracking();
   scheduleAskPanelReposition();
 }
 
@@ -1287,7 +2193,9 @@ function createTrailingContextTurn(sentence) {
   original.textContent = sentence.text;
   content.append(meta, original);
 
-  aside.append(marker, content, createSentenceAudioButton(sentence));
+  aside.append(marker, content);
+  const audioButton = createSentenceAudioButton(sentence);
+  if (audioButton) aside.append(audioButton);
   const savedNotes = createSavedLearningNotes(sentence.id, []);
   if (savedNotes) aside.append(savedNotes);
   return aside;
@@ -1310,14 +2218,41 @@ function createSentenceBreakdown(sentence, index, total, analysisProgressText) {
     ? `${sentence.speaker || "Speaker"} · ${formatClock(sentence.start)}–${formatClock(sentence.end)}`
     : `${sentence.speaker || "Speaker"}`;
   const audioButton = createSentenceAudioButton(sentence);
+  const editButton = document.createElement("button");
+  editButton.type = "button";
+  editButton.className = "text-button sentence-transcript-edit-button";
+  editButton.textContent = "修正这句";
+  editButton.setAttribute("aria-label", `修正第 ${index + 1} 句原文`);
   const original = document.createElement("p");
   original.className = "sentence-study-original askable-sentence";
   original.dataset.sentenceId = sentence.id;
   original.dataset.askSurface = "original";
   original.tabIndex = 0;
+  original.title = "双击可修正这句原文";
   original.textContent = sentence.text;
-  metaRow.append(meta, audioButton);
-  originalGroup.append(metaRow, original);
+  const openEditor = () => openSentenceTranscriptEditor({
+    article,
+    sentence,
+    original,
+    editButton,
+    index,
+    total,
+  });
+  editButton.addEventListener("click", openEditor);
+  original.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    window.getSelection()?.removeAllRanges();
+    state.selectionContext = null;
+    hideSelectionAction();
+    openEditor();
+  });
+  const editActions = document.createElement("div");
+  editActions.className = "sentence-transcript-entry-actions";
+  editActions.append(editButton);
+  metaRow.append(meta);
+  if (audioButton) metaRow.append(audioButton);
+  originalGroup.append(metaRow, original, editActions);
   header.append(sequence, originalGroup);
   article.append(header);
 
@@ -1342,7 +2277,14 @@ function createSentenceBreakdown(sentence, index, total, analysisProgressText) {
     label.textContent = "口语与转写说明";
     const list = document.createElement("div");
     list.className = "sentence-note-list";
-    notes.forEach((note) => list.append(createSentenceNote(note)));
+    notes.forEach((note) => list.append(createSentenceNote(note, {
+      article,
+      sentence,
+      original,
+      editButton,
+      index,
+      total,
+    })));
     noteSection.append(label, list);
     article.append(noteSection);
   }
@@ -1367,7 +2309,166 @@ function createSentenceBreakdown(sentence, index, total, analysisProgressText) {
   return article;
 }
 
+function openSentenceTranscriptEditor({
+  article,
+  sentence,
+  original,
+  editButton,
+  index,
+  total,
+  suggestedText = "",
+  suggestionHint = "",
+}) {
+  const normalizedSuggestion = String(suggestedText || "").trim();
+  const suggestionCopy = suggestionHint
+    || "已带入讲解中的建议修正。请结合原声核对，确认无误后再保存；此时尚未修改原文。";
+  const existingEditor = article.querySelector(".sentence-transcript-editor");
+  if (existingEditor) {
+    if (normalizedSuggestion) {
+      const existingTextarea = existingEditor.querySelector("textarea");
+      const existingHint = existingEditor.querySelector(".sentence-transcript-edit-hint");
+      if (existingTextarea) {
+        existingTextarea.value = normalizedSuggestion;
+        existingTextarea.dispatchEvent(new Event("input", { bubbles: true }));
+        existingTextarea.focus();
+        existingTextarea.setSelectionRange(existingTextarea.value.length, existingTextarea.value.length);
+      }
+      if (existingHint) {
+        existingHint.classList.add("is-suggestion");
+        existingHint.textContent = suggestionCopy;
+      }
+    }
+    return;
+  }
+  const editor = document.createElement("form");
+  editor.className = "sentence-transcript-editor";
+  const label = document.createElement("label");
+  label.textContent = "修正这句原文";
+  const textarea = document.createElement("textarea");
+  textarea.value = normalizedSuggestion || sentence.text;
+  textarea.rows = Math.max(2, Math.min(6, Math.ceil(textarea.value.length / 70)));
+  textarea.setAttribute("aria-label", `第 ${index + 1} 句修正后的英文原文`);
+  const hint = document.createElement("p");
+  hint.className = "sentence-transcript-edit-hint";
+  hint.classList.toggle("is-suggestion", Boolean(normalizedSuggestion));
+  hint.textContent = normalizedSuggestion
+    ? suggestionCopy
+    : "只修改本机逐字稿；原声时间和说话人不变，本句讲解会重新生成。";
+  const status = document.createElement("p");
+  status.className = "sentence-transcript-edit-status";
+  status.setAttribute("role", "status");
+  const actions = document.createElement("div");
+  actions.className = "sentence-transcript-edit-actions";
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className = "quiet-button";
+  cancelButton.textContent = "取消";
+  const saveButton = document.createElement("button");
+  saveButton.type = "submit";
+  saveButton.className = "primary-button";
+  saveButton.textContent = "保存并更新讲解";
+  actions.append(cancelButton, saveButton);
+  label.append(textarea);
+  editor.append(label, hint, status, actions);
+
+  const syncSaveState = () => {
+    const nextText = textarea.value.trim();
+    saveButton.disabled = editor.classList.contains("is-saving") || !nextText || nextText === sentence.text;
+  };
+  const close = () => {
+    editor.remove();
+    original.classList.remove("is-hidden");
+    editButton.disabled = false;
+    editButton.focus();
+  };
+  cancelButton.addEventListener("click", close);
+  textarea.addEventListener("input", syncSaveState);
+  editor.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+      return;
+    }
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !saveButton.disabled) {
+      event.preventDefault();
+      editor.requestSubmit();
+    }
+  });
+  editor.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (saveButton.disabled) return;
+    const nextText = textarea.value.trim();
+    const practiceColumn = elements.practiceColumn;
+    const previousScrollTop = practiceColumn?.scrollTop || 0;
+    editor.classList.add("is-saving");
+    textarea.disabled = true;
+    cancelButton.disabled = true;
+    saveButton.disabled = true;
+    saveButton.textContent = "保存中…";
+    status.textContent = "正在保存到本机";
+    const materialId = state.material.id;
+    try {
+      const payload = await api(`/api/materials/${materialId}/sentences/${sentence.id}`, {
+        method: "PATCH",
+        body: { text: nextText, expectedText: sentence.text },
+      });
+      if (state.material?.id !== materialId) {
+        showToast("这句原文已保存在原材料中，并开始更新讲解");
+        return;
+      }
+      state.material = payload.material;
+      if (payload.job) {
+        state.activeJobId = payload.job.id;
+        state.material.analysisStatus = "processing";
+        state.material.stage = payload.job.stage || "正在重新生成本句讲解";
+        scheduleAnalysisStatusPoll(500);
+      }
+      const updatedSentence = state.material.sentences.find((item) => item.id === sentence.id);
+      const replacement = createSentenceBreakdown(
+        updatedSentence,
+        index,
+        total,
+        "本句讲解正在更新。原声和修正后的逐字稿已经可以继续练习。",
+      );
+      if (article.isConnected) {
+        article.replaceWith(replacement);
+        replacement.querySelector(".sentence-transcript-edit-button")?.focus({ preventScroll: true });
+        if (practiceColumn) practiceColumn.scrollTop = previousScrollTop;
+      }
+      showToast("这句原文已修正，正在更新本句讲解");
+    } catch (error) {
+      editor.classList.remove("is-saving");
+      textarea.disabled = false;
+      cancelButton.disabled = false;
+      saveButton.textContent = "保存并更新讲解";
+      const latestText = error.status === 409 && typeof error.payload?.currentText === "string"
+        ? error.payload.currentText
+        : "";
+      if (latestText) {
+        sentence.text = latestText;
+        original.textContent = latestText;
+        const currentSentence = state.material?.sentences?.find((item) => item.id === sentence.id);
+        if (currentSentence) currentSentence.text = latestText;
+        status.textContent = `已载入最新原文：“${latestText}”。你的输入仍保留，核对后可直接再次保存。`;
+      } else {
+        status.textContent = error.message;
+      }
+      syncSaveState();
+      textarea.focus();
+    }
+  });
+
+  original.classList.add("is-hidden");
+  editButton.disabled = true;
+  original.after(editor);
+  syncSaveState();
+  textarea.focus();
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+}
+
 function createSentenceAudioButton(sentence) {
+  if (!hasReliableSentencePlayback(sentence, state.media?.duration)) return null;
   const button = document.createElement("button");
   button.type = "button";
   button.className = "sentence-audio-button";
@@ -1379,7 +2480,7 @@ function createSentenceAudioButton(sentence) {
   });
   button.dataset.playLabel = playbackRange.expanded
     ? "播放本句完整原声，含前后衔接"
-    : `播放第 ${formatClock(sentence.start)} 到 ${formatClock(sentence.end)} 的本句原声`;
+    : `播放第 ${formatClock(playbackRange.contentStart)} 到 ${formatClock(playbackRange.contentEnd)} 的本句原声`;
   button.setAttribute("aria-label", button.dataset.playLabel);
   button.setAttribute("aria-pressed", "false");
   button.dataset.playTitle = playbackRange.expanded ? "播放本句完整原声（含前后衔接）" : "播放本句原声";
@@ -1402,7 +2503,7 @@ function createSentenceDetail(labelText, text, kind) {
   return section;
 }
 
-function createSentenceNote(note) {
+function createSentenceNote(note, editorContext = null) {
   const item = document.createElement("article");
   item.className = `sentence-note is-${note.kind}`;
   const heading = document.createElement("div");
@@ -1422,16 +2523,37 @@ function createSentenceNote(note) {
   if (note.correctedEnglish) {
     const correction = document.createElement("div");
     correction.className = "sentence-note-correction";
+    const correctionHeading = document.createElement("div");
+    correctionHeading.className = "sentence-note-correction-heading";
     const correctionLabel = document.createElement("span");
     correctionLabel.textContent = note.kind === "grammar"
       ? "清晰、正确的表达"
       : note.kind === "mistranscription" ? "说话人实际最可能说的是" : "去掉口语痕迹后";
+    const adoptButton = document.createElement("button");
+    adoptButton.type = "button";
+    adoptButton.className = "text-button sentence-note-adopt-button";
+    adoptButton.textContent = "采用此修正";
+    adoptButton.setAttribute("aria-label", `采用此修正：${note.correctedEnglish}`);
+    adoptButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!editorContext) {
+        showToast("暂时找不到这句原文，请刷新后再试");
+        return;
+      }
+      openSentenceTranscriptEditor({
+        ...editorContext,
+        suggestedText: note.correctedEnglish,
+        suggestionHint: "已带入讲解中的建议修正。请结合原声核对，确认无误后再点“保存并更新讲解”；此时尚未修改原文。",
+      });
+    });
     const correctedEnglish = document.createElement("p");
-    correctedEnglish.className = "askable-sentence";
+    correctedEnglish.className = "askable-sentence sentence-note-correction-text";
     correctedEnglish.dataset.sentenceId = note.sentenceId;
     correctedEnglish.dataset.askSurface = "note-correction";
     correctedEnglish.textContent = note.correctedEnglish;
-    correction.append(correctionLabel, correctedEnglish);
+    correctionHeading.append(correctionLabel, adoptButton);
+    correction.append(correctionHeading, correctedEnglish);
     item.append(correction);
   }
   return item;
@@ -1440,28 +2562,42 @@ function createSentenceNote(note) {
 function createSentencePhrase(phrase) {
   const row = document.createElement("div");
   row.className = "sentence-phrase-row";
+  row.dataset.phraseSentenceId = phrase.sentenceId;
+  row.dataset.phraseText = phrase.text;
+  const guideKey = phraseGuideScopedKey(state.material?.id, phrase.sentenceId, phrase.text);
+  row.dataset.phraseGuideKey = guideKey;
   const content = document.createElement("div");
   const term = document.createElement("strong");
   term.className = "askable-sentence";
   term.dataset.sentenceId = phrase.sentenceId;
   term.dataset.askSurface = "phrase";
   term.textContent = phrase.text;
+  const heading = document.createElement("div");
+  heading.className = "sentence-phrase-heading";
   const copy = document.createElement("p");
   const phraseDetails = [phrase.meaningZh, phrase.usageZh]
     .filter(Boolean)
     .map((value) => String(value).replace(/[。.!！?？]+$/u, ""));
   copy.textContent = phraseDetails.length ? `${phraseDetails.join("。")}。` : "";
-  content.append(term, copy);
+  const guideButton = document.createElement("button");
+  guideButton.type = "button";
+  guideButton.className = "text-button phrase-guide-toggle";
+  guideButton.addEventListener("click", () => {
+    if (state.expandedPhraseGuideKeys.has(guideKey)) state.expandedPhraseGuideKeys.delete(guideKey);
+    else state.expandedPhraseGuideKeys.add(guideKey);
+    syncPhraseGuideDisclosure(row, guideButton, phrase);
+    if (state.expandedPhraseGuideKeys.has(guideKey)
+      && !findPhraseGuide(phrase)
+      && state.phraseGuideRequests.get(guideKey)?.status !== "pending") {
+      void requestPhraseGuide(phrase);
+    }
+  });
+  heading.append(term, guideButton);
+  content.append(heading, copy);
   const history = createPhraseQuestionHistory(phrase);
   if (history) content.append(history);
   const actions = document.createElement("div");
   actions.className = "phrase-actions";
-  const simpleButton = document.createElement("button");
-  simpleButton.type = "button";
-  simpleButton.className = "text-button simple-feedback-button";
-  simpleButton.textContent = "太简单";
-  simpleButton.setAttribute("aria-label", `标记为太简单：${phrase.text}`);
-  simpleButton.addEventListener("click", () => markPhraseTooSimple(phrase, simpleButton));
   const reviewButton = document.createElement("button");
   reviewButton.type = "button";
   reviewButton.className = "text-button";
@@ -1478,30 +2614,211 @@ function createSentencePhrase(phrase) {
     sourceText: phrase.text,
     question: `“${phrase.text}”在这句话里是什么意思，适合在什么职场场景使用？`,
   }, askButton));
-  actions.append(simpleButton, reviewButton, askButton);
+  actions.append(reviewButton, askButton);
   row.append(content, actions);
+  syncPhraseGuideDisclosure(row, guideButton, phrase);
   return row;
 }
 
-function questionHistoryItems() {
-  const historyItems = Array.isArray(state.material?.qaHistory) ? state.material.qaHistory : [];
+function phraseGuideScopedKey(materialId, sentenceId, phraseText) {
+  return [materialId || "", sentenceId || "", normalizeReviewText(phraseText)].join("|");
+}
+
+function findPhraseGuide(phrase, material = state.material) {
+  const phraseKey = `${phrase.sentenceId}|${normalizeReviewText(phrase.text)}`;
+  return (material?.phraseGuides || []).find((guide) => (
+    guide.key === phraseKey
+    || (guide.sentenceId === phrase.sentenceId && normalizeReviewText(guide.phraseText) === normalizeReviewText(phrase.text))
+  )) || null;
+}
+
+function syncPhraseGuideDisclosure(row, button, phrase) {
+  const guideKey = row.dataset.phraseGuideKey;
+  const expanded = state.expandedPhraseGuideKeys.has(guideKey);
+  const guide = findPhraseGuide(phrase);
+  const requestState = state.phraseGuideRequests.get(guideKey);
+  const panelId = phraseGuidePanelId(guideKey);
+  button.textContent = expanded ? "收起讲解" : "展开讲解";
+  button.setAttribute("aria-expanded", String(expanded));
+  button.setAttribute("aria-controls", panelId);
+  row.querySelector(".sentence-phrase-guide")?.remove();
+  if (!expanded) return;
+  const panel = createPhraseGuidePanel(phrase, guide, requestState, panelId);
+  row.append(panel);
+}
+
+function phraseGuidePanelId(guideKey) {
+  let hash = 2166136261;
+  for (const character of String(guideKey || "")) {
+    hash ^= character.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `phrase-guide-${(hash >>> 0).toString(36)}`;
+}
+
+function createPhraseGuidePanel(phrase, guide, requestState, panelId) {
+  const panel = document.createElement("section");
+  panel.className = "sentence-phrase-guide";
+  panel.id = panelId;
+  panel.setAttribute("aria-label", `${phrase.text} 的展开讲解`);
+  panel.setAttribute("aria-live", "polite");
+  panel.setAttribute("aria-busy", String(!guide && requestState?.status === "pending"));
+  if (!guide && requestState?.status === "pending") {
+    const pending = document.createElement("p");
+    pending.className = "phrase-guide-status is-pending";
+    pending.setAttribute("role", "status");
+    pending.textContent = "所选 AI 正在整理用法、搭配和更多职场例句…";
+    panel.append(pending);
+    return panel;
+  }
+  if (!guide && requestState?.status === "error") {
+    const error = document.createElement("p");
+    error.className = "phrase-guide-status is-error";
+    error.setAttribute("role", "status");
+    error.textContent = requestState.error || "这次没有生成成功。";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "text-button";
+    retry.textContent = "重试";
+    retry.addEventListener("click", () => void requestPhraseGuide(phrase));
+    panel.append(error, retry);
+    return panel;
+  }
+  if (!guide) {
+    const ready = document.createElement("p");
+    ready.className = "phrase-guide-status";
+    ready.textContent = "展开后会结合当前原句，补充实际用法和更多职场例句。";
+    panel.append(ready);
+    return panel;
+  }
+
+  appendPhraseGuideSection(panel, "怎么用", guide.usageZh);
+  if (guide.patternZh) appendPhraseGuideSection(panel, "搭配与句型", guide.patternZh);
+  if (Array.isArray(guide.alternatives) && guide.alternatives.length) {
+    const section = createPhraseGuideSection("类似表达");
+    const list = document.createElement("ul");
+    guide.alternatives.forEach((alternative) => {
+      const item = document.createElement("li");
+      const term = document.createElement("strong");
+      term.textContent = alternative.text;
+      const difference = document.createElement("span");
+      difference.textContent = alternative.differenceZh;
+      item.append(term, difference);
+      list.append(item);
+    });
+    section.append(list);
+    panel.append(section);
+  }
+  if (Array.isArray(guide.examples) && guide.examples.length) {
+    const section = createPhraseGuideSection("更多职场例句");
+    const list = document.createElement("ol");
+    guide.examples.forEach((example) => {
+      const item = document.createElement("li");
+      const english = document.createElement("p");
+      english.textContent = example.english;
+      const meaning = document.createElement("p");
+      meaning.textContent = example.meaningZh;
+      item.append(english, meaning);
+      list.append(item);
+    });
+    section.append(list);
+    panel.append(section);
+  }
+  return panel;
+}
+
+function createPhraseGuideSection(labelText) {
+  const section = document.createElement("div");
+  section.className = "phrase-guide-section";
+  const label = document.createElement("strong");
+  label.textContent = labelText;
+  section.append(label);
+  return section;
+}
+
+function appendPhraseGuideSection(panel, labelText, copyText) {
+  if (!copyText) return;
+  const section = createPhraseGuideSection(labelText);
+  const copy = document.createElement("p");
+  copy.textContent = copyText;
+  section.append(copy);
+  panel.append(section);
+}
+
+function refreshVisiblePhraseGuide(phrase) {
+  const guideKey = phraseGuideScopedKey(state.material?.id, phrase.sentenceId, phrase.text);
+  const row = [...document.querySelectorAll(".sentence-phrase-row")]
+    .find((candidate) => candidate.dataset.phraseGuideKey === guideKey);
+  const button = row?.querySelector(".phrase-guide-toggle");
+  if (row && button) syncPhraseGuideDisclosure(row, button, phrase);
+}
+
+async function requestPhraseGuide(phrase) {
+  const materialId = state.material?.id;
+  if (!materialId) return;
+  const sentence = state.material.sentences.find((item) => item.id === phrase.sentenceId);
+  if (!sentence) return showToast("没有找到这个表达对应的原句");
+  const guideKey = phraseGuideScopedKey(materialId, phrase.sentenceId, phrase.text);
+  if (state.phraseGuideRequests.get(guideKey)?.status === "pending") return;
+  const requestToken = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  state.phraseGuideRequests.set(guideKey, { status: "pending", requestToken, error: "" });
+  refreshVisiblePhraseGuide(phrase);
+  try {
+    const payload = await api(`/api/materials/${materialId}/phrase-guides`, {
+      method: "POST",
+      body: {
+        sentenceId: phrase.sentenceId,
+        phraseText: phrase.text,
+        expectedSentenceText: sentence.text,
+      },
+    });
+    const latest = state.phraseGuideRequests.get(guideKey);
+    if (latest?.requestToken !== requestToken) return;
+    const phraseGuide = payload.phraseGuide;
+    if (!phraseGuide) throw new Error("所选 AI 没有返回表达讲解，请重试");
+    state.phraseGuideRequests.delete(guideKey);
+    if (state.material?.id === materialId) {
+      state.material.phraseGuides = Array.isArray(state.material.phraseGuides) ? state.material.phraseGuides : [];
+      const index = state.material.phraseGuides.findIndex((guide) => (
+        guide.key === phraseGuide.key
+        || (guide.sentenceId === phraseGuide.sentenceId
+          && normalizeReviewText(guide.phraseText) === normalizeReviewText(phraseGuide.phraseText))
+      ));
+      if (index >= 0) state.material.phraseGuides[index] = phraseGuide;
+      else state.material.phraseGuides.push(phraseGuide);
+      refreshVisiblePhraseGuide(phrase);
+    }
+  } catch (error) {
+    const latest = state.phraseGuideRequests.get(guideKey);
+    if (latest?.requestToken !== requestToken) return;
+    state.phraseGuideRequests.set(guideKey, {
+      status: "error",
+      requestToken,
+      error: error.message || "展开讲解生成失败",
+    });
+    if (state.material?.id === materialId) refreshVisiblePhraseGuide(phrase);
+  }
+}
+
+function questionHistoryItems(material = state.material) {
+  const historyItems = Array.isArray(material?.qaHistory) ? material.qaHistory : [];
   const items = [];
   const historyIds = new Set();
   const compositeKeys = new Set();
   for (const item of historyItems) {
     const key = questionHistoryKey(item);
     if (item.id && historyIds.has(item.id)) continue;
-    items.push({ ...item, isLegacyReview: false });
+    items.push({ ...item, materialId: material?.id || "", isLegacyReview: false });
     if (item.id) historyIds.add(item.id);
     if (key) compositeKeys.add(key);
   }
-  for (const item of reviewItems().filter((candidate) => candidate.kind === "qa")) {
+  for (const item of reviewItems(material).filter((candidate) => candidate.kind === "qa")) {
     const key = questionHistoryKey(item);
     // A review linked to a real history record is not a second copy of that
     // record. This also prevents a deliberately deleted history record from
     // being recreated by its still-saved review item.
     if (item.historyId || !key || compositeKeys.has(key)) continue;
-    items.push({ ...item, isLegacyReview: true });
+    items.push({ ...item, materialId: material?.id || "", isLegacyReview: true });
     compositeKeys.add(key);
   }
   return items.sort((left, right) => Date.parse(right.createdAt || 0) - Date.parse(left.createdAt || 0));
@@ -1645,25 +2962,29 @@ function createQuestionHistoryRecord(note, open) {
   return details;
 }
 
-function findQuestionHistoryReview(note) {
-  if (note.isLegacyReview) return reviewItems().find((item) => item.id === note.id);
+function findQuestionHistoryReview(note, material = state.material) {
+  if (note.isLegacyReview) return reviewItems(material).find((item) => item.id === note.id);
   const key = questionHistoryKey(note);
-  return reviewItems().find((item) => (
+  return reviewItems(material).find((item) => (
     item.kind === "qa"
     && (item.historyId === note.id || (!item.historyId && questionHistoryKey(item) === key))
   ));
 }
 
-async function toggleQuestionHistoryReview(note, button) {
+async function toggleQuestionHistoryReview(note, button, materialId = note.materialId || state.material?.id) {
+  if (!materialId) return;
+  const previousReviewKey = currentReviewQueueItem()?.key || "";
+  const previousReviewIndex = state.reviewQueueIndex;
   button.disabled = true;
   try {
-    const saved = findQuestionHistoryReview(note);
+    const material = state.material?.id === materialId ? state.material : null;
+    const saved = findQuestionHistoryReview(note, material);
     if (saved) {
-      const payload = await api(`/api/materials/${state.material.id}/review-items/${saved.id}`, { method: "DELETE" });
-      state.material = payload.material;
+      const payload = await api(`/api/materials/${materialId}/review-items/${saved.id}`, { method: "DELETE" });
+      if (state.material?.id === materialId) state.material = payload.material;
       showToast("已从复习中移除，问问记录仍会保留");
     } else {
-      const payload = await api(`/api/materials/${state.material.id}/review-items`, {
+      const payload = await api(`/api/materials/${materialId}/review-items`, {
         method: "POST",
         body: {
           kind: "qa",
@@ -1676,10 +2997,14 @@ async function toggleQuestionHistoryReview(note, button) {
           grammarPointZh: note.grammarPointZh || "",
         },
       });
-      state.material = payload.material;
+      if (state.material?.id === materialId) state.material = payload.material;
       showToast("已把这条问问记录加入对应自然句复习");
     }
-    renderAnalysis(currentUnit());
+    if (state.material?.id === materialId && currentUnit()) {
+      renderAnalysis(currentUnit());
+      renderAskRail({ preserveScroll: true });
+    }
+    await syncReviewQueueAfterReviewMutation({ previousReviewKey, previousReviewIndex, materialId });
     loadMaterials();
   } catch (error) {
     button.disabled = false;
@@ -1687,7 +3012,8 @@ async function toggleQuestionHistoryReview(note, button) {
   }
 }
 
-async function deleteQuestionHistoryRecord(note, button) {
+async function deleteQuestionHistoryRecord(note, button, materialId = note.materialId || state.material?.id) {
+  if (!materialId) return;
   if (button.dataset.confirming !== "true") {
     button.dataset.confirming = "true";
     button.textContent = "确认删除";
@@ -1702,17 +3028,29 @@ async function deleteQuestionHistoryRecord(note, button) {
   }
 
   button.disabled = true;
-  const linkedReviewWillRemain = !note.isLegacyReview && Boolean(findQuestionHistoryReview(note));
+  const previousReviewKey = currentReviewQueueItem()?.key || "";
+  const previousReviewIndex = state.reviewQueueIndex;
+  const material = state.material?.id === materialId ? state.material : null;
+  const linkedReviewWillRemain = !note.isLegacyReview && Boolean(findQuestionHistoryReview(note, material));
   try {
     const endpoint = note.isLegacyReview
-      ? `/api/materials/${state.material.id}/review-items/${note.id}`
-      : `/api/materials/${state.material.id}/qa-history/${note.id}`;
+      ? `/api/materials/${materialId}/review-items/${note.id}`
+      : `/api/materials/${materialId}/qa-history/${note.id}`;
     const payload = await api(endpoint, { method: "DELETE" });
-    state.material = payload.material;
+    if (state.material?.id === materialId) state.material = payload.material;
+    for (const [cardId, card] of state.askThreads) {
+      if (card.materialId === materialId && card.historyId === note.id) state.askThreads.delete(cardId);
+    }
     if (note.isLegacyReview) showToast("旧版问问记录已删除，并已从复习中移除");
     else if (linkedReviewWillRemain) showToast("问问记录已删除，已加入复习的内容仍保留");
     else showToast("问问记录已删除");
-    renderAnalysis(currentUnit());
+    if (state.material?.id === materialId && currentUnit()) {
+      renderAnalysis(currentUnit());
+      renderAskRail({ preserveScroll: true });
+    }
+    if (note.isLegacyReview) {
+      await syncReviewQueueAfterReviewMutation({ previousReviewKey, previousReviewIndex, materialId });
+    }
     loadMaterials();
   } catch (error) {
     button.disabled = false;
@@ -1728,7 +3066,84 @@ function revealAnswer() {
   elements.answerArea.classList.remove("is-hidden");
   elements.revealButton.classList.add("is-hidden");
   renderDiff(elements.dictationInput.value, currentUnit().text);
+  renderAskTextAnchors();
   renderSegmentContinuation(currentUnit(), currentUnits());
+  schedulePhraseExposureTracking();
+}
+
+function phraseExposureKey(materialId, sentenceId, phraseText) {
+  return [materialId || "", sentenceId || "", normalizeReviewText(phraseText)].join("|");
+}
+
+function clearPhraseExposureTracking() {
+  state.phraseExposureObserver?.disconnect();
+  state.phraseExposureObserver = null;
+  state.phraseExposureTimers.forEach((timer) => clearTimeout(timer));
+  state.phraseExposureTimers.clear();
+}
+
+function schedulePhraseExposureTracking() {
+  clearPhraseExposureTracking();
+  if (!state.revealed || !state.material || !currentUnit() || typeof IntersectionObserver !== "function") return;
+  const materialId = state.material.id;
+  const unitSentenceIdSet = new Set(unitSentenceIds(currentUnit()));
+  const rows = [...elements.sentenceBreakdownList.querySelectorAll(".sentence-phrase-row[data-phrase-sentence-id]")]
+    .filter((row) => unitSentenceIdSet.has(row.dataset.phraseSentenceId));
+  if (!rows.length) return;
+  const root = globalThis.matchMedia?.("(min-width: 1061px)")?.matches ? elements.practiceColumn : null;
+  state.phraseExposureObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      const row = entry.target;
+      const key = phraseExposureKey(materialId, row.dataset.phraseSentenceId, row.dataset.phraseText);
+      const existingTimer = state.phraseExposureTimers.get(row);
+      if (!entry.isIntersecting || entry.intersectionRatio < PHRASE_EXPOSURE_MIN_RATIO) {
+        if (existingTimer) clearTimeout(existingTimer);
+        state.phraseExposureTimers.delete(row);
+        return;
+      }
+      if (existingTimer || state.phraseExposureRecorded.has(key) || state.phraseExposurePending.has(key)) return;
+      const timer = setTimeout(() => {
+        state.phraseExposureTimers.delete(row);
+        const current = currentUnit();
+        if (!row.isConnected
+          || !state.revealed
+          || state.material?.id !== materialId
+          || !current
+          || !unitSentenceIds(current).includes(row.dataset.phraseSentenceId)) return;
+        void recordPhraseExposure({
+          materialId,
+          sentenceId: row.dataset.phraseSentenceId,
+          phraseText: row.dataset.phraseText,
+          key,
+        });
+      }, PHRASE_EXPOSURE_DELAY_MS);
+      state.phraseExposureTimers.set(row, timer);
+    });
+  }, { root, threshold: [0, PHRASE_EXPOSURE_MIN_RATIO] });
+  rows.forEach((row) => state.phraseExposureObserver.observe(row));
+}
+
+async function recordPhraseExposure({ materialId, sentenceId, phraseText, key }) {
+  if (state.phraseExposureRecorded.has(key) || state.phraseExposurePending.has(key)) return;
+  state.phraseExposurePending.add(key);
+  try {
+    const payload = await api("/api/learner-profile/phrase-signals", {
+      method: "POST",
+      body: {
+        event: "exposed",
+        materialId,
+        sentenceId,
+        phraseText,
+        sessionId: PHRASE_SIGNAL_SESSION_ID,
+      },
+    });
+    state.phraseExposureRecorded.add(key);
+    if (payload.profile) state.learnerProfile = payload.profile;
+  } catch (error) {
+    console.warn("Failed to record phrase exposure", { materialId, sentenceId, error });
+  } finally {
+    state.phraseExposurePending.delete(key);
+  }
 }
 
 function renderSegmentContinuation(unit = currentUnit(), units = currentUnits()) {
@@ -1736,20 +3151,23 @@ function renderSegmentContinuation(unit = currentUnit(), units = currentUnits())
   elements.segmentContinuation.classList.toggle("is-hidden", !visible);
   if (!visible) return;
 
-  const currentIndex = units.findIndex((candidate) => candidate.id === unit.id);
-  const resolvedIndex = currentIndex >= 0 ? currentIndex : Math.min(Math.max(0, state.index), units.length - 1);
-  const canAdvance = resolvedIndex < units.length - 1;
+  const currentIndex = inReviewMode()
+    ? state.reviewQueueIndex
+    : units.findIndex((candidate) => candidate.id === unit.id);
+  const total = inReviewMode() ? state.reviewQueue.length : units.length;
+  const resolvedIndex = currentIndex >= 0 ? currentIndex : Math.min(Math.max(0, state.index), total - 1);
+  const canAdvance = resolvedIndex < total - 1;
   elements.bottomNextButton.classList.toggle("is-hidden", !canAdvance);
   elements.segmentCompleteState.classList.toggle("is-hidden", canAdvance);
 
   if (canAdvance) {
     const nextPosition = resolvedIndex + 2;
-    elements.bottomNextEyebrow.textContent = state.reviewOnly ? "继续本轮复习" : "继续精听";
-    elements.bottomNextLabel.textContent = state.reviewOnly ? "下一条需复习片段" : "下一段";
-    elements.bottomNextHint.textContent = `第 ${nextPosition} / ${units.length} 段 · 回到顶部并自动播放原声`;
+    elements.bottomNextEyebrow.textContent = inReviewMode() ? "继续本轮复习" : "继续精听";
+    elements.bottomNextLabel.textContent = inReviewMode() ? "下一条需复习片段" : "下一段";
+    elements.bottomNextHint.textContent = `第 ${nextPosition} / ${total} 段 · 回到顶部并自动播放原声`;
     elements.bottomNextButton.setAttribute("aria-label", `进入第 ${nextPosition} 段并自动播放原声`);
   } else {
-    elements.segmentCompleteLabel.textContent = state.reviewOnly ? "本轮复习已到最后一段" : "已到最后一段";
+    elements.segmentCompleteLabel.textContent = inReviewMode() ? "本轮复习已到最后一段" : "已到最后一段";
   }
 }
 
@@ -1757,6 +3175,20 @@ function advanceFromBottom() {
   const units = currentUnits();
   const unit = currentUnit();
   if (!unit || !units.length) return;
+  if (inReviewMode()) {
+    if (state.reviewQueueIndex >= state.reviewQueue.length - 1) return;
+    void activateReviewQueueIndex(state.reviewQueueIndex + 1, { autoplay: true, resetScroll: false }).then((activated) => {
+      if (!activated) return;
+      const position = state.reviewQueueIndex + 1;
+      requestAnimationFrame(() => {
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        scrollTrainingWorkspaceToTop({ behavior: reducedMotion ? "auto" : "smooth" });
+        elements.listenPrompt.focus({ preventScroll: true });
+        elements.unitNavigationStatus.textContent = `已进入第 ${position} / ${state.reviewQueue.length} 条复习内容，正在播放原声`;
+      });
+    });
+    return;
+  }
   const currentIndex = units.findIndex((candidate) => candidate.id === unit.id);
   const resolvedIndex = currentIndex >= 0 ? currentIndex : Math.min(Math.max(0, state.index), units.length - 1);
   if (resolvedIndex >= units.length - 1) return;
@@ -1807,15 +3239,19 @@ function findParagraphReview(paragraphId) {
 }
 
 async function togglePhraseReview(phrase, button) {
+  const materialId = state.material?.id;
+  const previousReviewKey = currentReviewQueueItem()?.key || "";
+  const previousReviewIndex = state.reviewQueueIndex;
+  if (!materialId) return;
   button.disabled = true;
   try {
     const saved = findPhraseReview(phrase.sentenceId, phrase.text);
     if (saved) {
-      const payload = await api(`/api/materials/${state.material.id}/review-items/${saved.id}`, { method: "DELETE" });
+      const payload = await api(`/api/materials/${materialId}/review-items/${saved.id}`, { method: "DELETE" });
       state.material = payload.material;
       showToast("已从复习中移除");
     } else {
-      const payload = await api(`/api/materials/${state.material.id}/review-items`, {
+      const payload = await api(`/api/materials/${materialId}/review-items`, {
         method: "POST",
         body: {
           kind: "phrase",
@@ -1829,12 +3265,32 @@ async function togglePhraseReview(phrase, button) {
       showToast("已按自然句加入复习");
     }
     renderCurrentUnit();
+    await syncReviewQueueAfterReviewMutation({ previousReviewKey, previousReviewIndex, materialId });
     loadMaterials();
   } catch (error) {
     showToast(error.message);
   } finally {
     button.disabled = false;
   }
+}
+
+async function syncReviewQueueAfterReviewMutation({ previousReviewKey = "", previousReviewIndex = 0, materialId = "" } = {}) {
+  if (!inReviewMode()) return true;
+  const refreshed = await refreshReviewQueue({ preferredKey: previousReviewKey, preferredMaterialId: materialId });
+  if (!refreshed || !inReviewMode()) return false;
+  if (!state.reviewQueue.length) {
+    state.revealed = false;
+    commitReviewStudyState();
+    renderCurrentUnit();
+    return true;
+  }
+  const preservedIndex = previousReviewKey
+    ? state.reviewQueue.findIndex((item) => item.key === previousReviewKey)
+    : -1;
+  const targetIndex = preservedIndex >= 0
+    ? preservedIndex
+    : Math.min(Math.max(0, previousReviewIndex), state.reviewQueue.length - 1);
+  return activateReviewQueueIndex(targetIndex, { autoplay: false, resetScroll: false });
 }
 
 async function markPhraseTooSimple(phrase, button) {
@@ -1902,17 +3358,75 @@ function updateSelectionAction() {
   }
   const rect = range.getBoundingClientRect();
   if (!rect.width && !rect.height) return hideSelectionAction();
+  const textAnchor = createAskTextAnchor(startSentence, range);
+  if (!textAnchor) return hideSelectionAction();
   state.selectionContext = {
     sentenceId: startSentence.dataset.sentenceId,
     sourceText: selectedText,
     question: defaultSelectionQuestion(selectedText),
     anchorSurface: askAnchorSurface(startSentence),
+    ...textAnchor,
     anchorRect: snapshotRect(rect),
     returnFocus: startSentence,
   };
   elements.selectionAskButton.style.left = `${Math.max(12, Math.min(window.innerWidth - 104, rect.left + rect.width / 2 - 43))}px`;
   elements.selectionAskButton.style.top = `${Math.max(12, rect.top - 43)}px`;
   elements.selectionAskButton.classList.remove("is-hidden");
+}
+
+function createAskTextAnchor(surface, range) {
+  if (!surface?.contains(range.startContainer) || !surface.contains(range.endContainer)) return null;
+  const surfaceText = surface.textContent || "";
+  const before = document.createRange();
+  before.selectNodeContents(surface);
+  before.setEnd(range.startContainer, range.startOffset);
+  let anchorStart = before.toString().length;
+  let anchorEnd = anchorStart + range.toString().length;
+  const rawExact = surfaceText.slice(anchorStart, anchorEnd);
+  const leadingWhitespace = rawExact.match(/^\s*/u)?.[0].length || 0;
+  const trailingWhitespace = rawExact.match(/\s*$/u)?.[0].length || 0;
+  anchorStart += leadingWhitespace;
+  anchorEnd -= trailingWhitespace;
+  const anchorExact = surfaceText.slice(anchorStart, anchorEnd);
+  if (!anchorExact || anchorEnd <= anchorStart || anchorExact.length > 500) return null;
+  return {
+    anchorSurfaceText: surfaceText,
+    anchorStart,
+    anchorEnd,
+    anchorExact,
+    prefix: surfaceText.slice(Math.max(0, anchorStart - 64), anchorStart),
+    suffix: surfaceText.slice(anchorEnd, anchorEnd + 64),
+  };
+}
+
+function createWholeSurfaceAnchor(surface) {
+  const anchorSurfaceText = surface?.textContent || "";
+  if (!anchorSurfaceText || anchorSurfaceText.length > 500) return null;
+  return {
+    anchorSurfaceText,
+    anchorStart: 0,
+    anchorEnd: anchorSurfaceText.length,
+    anchorExact: anchorSurfaceText,
+    prefix: "",
+    suffix: "",
+  };
+}
+
+function askTextAnchorPayload(anchor) {
+  if (!anchor?.anchorSurface
+    || !anchor.anchorSurfaceText
+    || !anchor.anchorExact
+    || !Number.isInteger(anchor.anchorStart)
+    || !Number.isInteger(anchor.anchorEnd)) return {};
+  return {
+    anchorSurface: anchor.anchorSurface,
+    anchorSurfaceText: anchor.anchorSurfaceText,
+    anchorStart: anchor.anchorStart,
+    anchorEnd: anchor.anchorEnd,
+    anchorExact: anchor.anchorExact,
+    prefix: anchor.prefix || "",
+    suffix: anchor.suffix || "",
+  };
 }
 
 function closestAskableSentence(node) {
@@ -1933,145 +3447,420 @@ function askAboutSelection() {
 }
 
 function openAskPanel(context, anchorElement = null) {
+  if (!state.material) return;
   stopPronunciation();
   const sentence = state.material.sentences.find((item) => item.id === context.sentenceId);
   if (!sentence) return showToast("没有找到这处原文对应的自然句");
   const sourceText = String(context.sourceText || "").trim();
   if (!sourceText) return showToast("请先选择或指定想问的内容");
-  state.askRequestId += 1;
   const initialAnchor = resolveInitialAskAnchor(context, anchorElement);
-  const anchorSurface = context.anchorSurface || askAnchorSurface(initialAnchor);
-  state.askContext = {
+  const textAnchor = context.anchorExact
+    ? {
+      anchorSurfaceText: context.anchorSurfaceText,
+      anchorStart: context.anchorStart,
+      anchorEnd: context.anchorEnd,
+      anchorExact: context.anchorExact,
+      prefix: context.prefix ?? context.anchorPrefix ?? "",
+      suffix: context.suffix ?? context.anchorSuffix ?? "",
+    }
+    : createWholeSurfaceAnchor(initialAnchor);
+  const cardId = createAskCardId();
+  const card = {
+    cardId,
     materialId: state.material.id,
     sentenceId: sentence.id,
+    sentenceText: sentence.text,
     sourceText,
-    anchorSurface,
+    learningTargetText: sourceText,
+    anchorSurface: context.anchorSurface || askAnchorSurface(initialAnchor),
+    ...(textAnchor || {}),
+    question: typeof context.question === "string" ? context.question : defaultSelectionQuestion(sourceText),
+    status: "draft",
+    error: "",
+    createdAt: new Date().toISOString(),
+    requestToken: "",
+    returnFocus: context.returnFocus || anchorElement || initialAnchor || null,
+    speaker: sentence.speaker || "",
+    start: sentence.start,
+    end: sentence.end,
   };
-  state.askAnswer = null;
+  state.askThreads.set(cardId, card);
+  state.activeAskThreadId = cardId;
+  state.askRailCollapsed = false;
   setAskAnchorElement(initialAnchor);
-  state.askAnchorRect = snapshotRect(state.askAnchorElement?.getBoundingClientRect() || context.anchorRect);
-  state.askReturnFocus = context.returnFocus || anchorElement || state.askAnchorElement || null;
-  elements.askPanel.dataset.sentenceId = sentence.id;
-  elements.askPanel.dataset.sourceText = sourceText;
-  elements.askPanel.dataset.anchorSurface = anchorSurface;
-  elements.askSourceText.textContent = sourceText;
-  elements.askQuestionInput.value = context.question || defaultSelectionQuestion(sourceText);
-  elements.askStatusText.textContent = "回答会结合这句话的前后语境。";
-  elements.askAnswerBlock.classList.add("is-hidden");
-  elements.askReconstructionBlock.classList.add("is-hidden");
-  elements.askGrammarPoint.classList.add("is-hidden");
-  elements.askAnchorLink.classList.add("is-hidden");
-  elements.askPanel.setAttribute("aria-busy", "false");
-  elements.askSubmitButton.disabled = false;
-  elements.askPanel.scrollTop = 0;
-  elements.askPanel.classList.remove("is-hidden");
-  elements.trainingView.classList.add("has-ask-thread");
-  document.body.classList.add("has-ask-thread");
-  scheduleAskPanelReposition();
-  requestAnimationFrame(() => {
-    schedulePaneResizeRefresh();
-    elements.askQuestionInput.focus({ preventScroll: true });
+  if (window.innerWidth < 1880 && elements.segmentDrawer.classList.contains("is-open")) closeSegmentDrawer(false);
+  renderAskRail({ preserveScroll: true, focusCardId: cardId });
+}
+
+function createAskCardId() {
+  return `ask-${Date.now()}-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
+}
+
+function askCardsForMaterial(material = state.material) {
+  if (!material?.id) return [];
+  const unit = material.id === state.material?.id ? currentUnit() : null;
+  return mergeAskThreadCards({
+    materialId: material.id,
+    sentenceIds: unit ? unitSentenceIds(unit) : [],
+    historyItems: questionHistoryItems(material),
+    transientCards: state.askThreads,
   });
 }
 
-function closeAskPanel(restoreFocus = true) {
-  stopPronunciation();
-  state.askRequestId += 1;
-  const returnFocus = state.askReturnFocus;
-  const shouldRefreshHistory = state.askHistoryDirty;
-  if (state.askRepositionFrame) cancelAnimationFrame(state.askRepositionFrame);
-  state.askRepositionFrame = null;
+function askCardById(cardId, material = state.material) {
+  return askCardsForMaterial(material).find((card) => card.cardId === cardId) || null;
+}
+
+function hideAskRail() {
+  if (!elements.askPanel.classList.contains("is-hidden")) {
+    state.askRailScrollTop = elements.askThreadList.scrollTop;
+  }
   elements.askPanel.classList.add("is-hidden");
-  elements.askPanel.style.removeProperty("left");
-  elements.askPanel.style.removeProperty("top");
-  elements.askPanel.style.removeProperty("max-height");
-  elements.askPanel.removeAttribute("data-layout");
-  elements.askPanel.removeAttribute("data-anchor-state");
-  elements.askPanel.setAttribute("aria-busy", "false");
-  elements.askSubmitButton.disabled = false;
-  elements.askAnchorLink.classList.add("is-hidden");
+  elements.askRailToggle.classList.add("is-hidden");
   elements.trainingView.classList.remove("has-ask-thread");
   document.body.classList.remove("has-ask-thread");
-  state.askContext = null;
-  state.askAnswer = null;
-  state.askHistoryDirty = false;
-  state.askAnchorRect = null;
   setAskAnchorElement(null);
-  state.askReturnFocus = null;
-  delete elements.askPanel.dataset.sentenceId;
-  delete elements.askPanel.dataset.sourceText;
-  delete elements.askPanel.dataset.anchorSurface;
-  if (restoreFocus && returnFocus?.isConnected) {
-    if (!returnFocus.matches?.("button, input, textarea, select, a, [tabindex]")) returnFocus.tabIndex = -1;
-    returnFocus.focus?.({ preventScroll: true });
-  }
-  if (shouldRefreshHistory && state.material && state.revealed && currentUnit()) {
-    requestAnimationFrame(() => renderAnalysis(currentUnit()));
-  }
   schedulePaneResizeRefresh();
 }
 
-function positionAskPanel(anchorRect) {
-  if (elements.askPanel.classList.contains("is-hidden")) return;
-  const padding = 12;
-  const gap = 14;
-  const isBottomSheet = window.innerWidth <= 1060;
-  const isDockedRail = window.matchMedia(DOCKED_ASK_THREAD_QUERY).matches;
-  const layout = isBottomSheet ? "bottom" : isDockedRail ? "rail" : "floating";
-  const bottomOffset = isBottomSheet ? 64 : 0;
-  const viewportMaxHeight = window.innerHeight - padding * 2 - bottomOffset;
-  elements.askPanel.dataset.layout = layout;
-  elements.askPanel.style.maxHeight = `${viewportMaxHeight}px`;
-  const width = elements.askPanel.offsetWidth;
-  const height = elements.askPanel.offsetHeight;
-  const anchorState = classifyAskAnchor(anchorRect, window.innerHeight, padding);
-  const top = isBottomSheet
-    ? resolveAskPanelTop({
-      anchorRect: { top: window.innerHeight, bottom: window.innerHeight },
-      panelHeight: height,
-      viewportHeight: window.innerHeight,
-      padding,
-      bottomOffset,
-    })
-    : resolveAskPanelTop({ anchorRect, panelHeight: height, viewportHeight: window.innerHeight, padding });
-  let left = window.innerWidth - width - padding;
-  let placement = "rail";
-  if (isBottomSheet) {
-    placement = "bottom";
-  } else if (!isDockedRail && anchorRect && anchorState === "visible") {
-    const roomRight = window.innerWidth - anchorRect.right - gap - padding;
-    const roomLeft = anchorRect.left - gap - padding;
-    if (roomRight >= width) {
-      left = anchorRect.right + gap;
-      placement = "right";
-    } else if (roomLeft >= width) {
-      left = anchorRect.left - width - gap;
-      placement = "left";
+function collapseAskRail(restoreFocus = true) {
+  const activeCard = askCardById(state.activeAskThreadId);
+  state.askRailScrollTop = elements.askThreadList.scrollTop;
+  state.askRailCollapsed = true;
+  renderAskRail({ preserveScroll: true });
+  if (restoreFocus && activeCard?.returnFocus?.isConnected) {
+    activeCard.returnFocus.focus?.({ preventScroll: true });
+  }
+}
+
+function expandAskRail() {
+  if (!state.material || !askCardsForMaterial().length) return;
+  state.askRailCollapsed = false;
+  renderAskRail({ preserveScroll: true });
+  requestAnimationFrame(() => elements.closeAskPanelButton.focus({ preventScroll: true }));
+}
+
+function renderAskRail({ preserveScroll = false, focusCardId = "" } = {}) {
+  const material = state.material;
+  if (!material || elements.trainingView.classList.contains("is-hidden")) {
+    hideAskRail();
+    return;
+  }
+  const cards = askCardsForMaterial(material);
+  if (!cards.length) {
+    state.activeAskThreadId = null;
+    elements.askThreadList.replaceChildren();
+    elements.askRailTotalCount.textContent = "0 条问问";
+    elements.askRailToggleCount.textContent = "0";
+    elements.askRailPendingCount.classList.add("is-hidden");
+    elements.askRailTogglePending.classList.add("is-hidden");
+    renderAskTextAnchors([]);
+    hideAskRail();
+    return;
+  }
+  if (!cards.some((card) => card.cardId === state.activeAskThreadId)) {
+    state.activeAskThreadId = cards[0].cardId;
+  }
+  const previousScrollTop = preserveScroll ? elements.askThreadList.scrollTop || state.askRailScrollTop : 0;
+  const focusedCardId = document.activeElement?.closest?.("[data-ask-card-id]")?.dataset.askCardId || "";
+  const focusedAction = document.activeElement?.dataset?.askAction || "";
+  const selectionStart = document.activeElement instanceof HTMLTextAreaElement ? document.activeElement.selectionStart : null;
+  const selectionEnd = document.activeElement instanceof HTMLTextAreaElement ? document.activeElement.selectionEnd : null;
+  const counts = countAskThreadCards(cards);
+  elements.askRailTotalCount.textContent = `${counts.total} 条问问`;
+  elements.askRailToggleCount.textContent = String(counts.total);
+  elements.askRailPendingCount.textContent = `${counts.pending} 条生成中`;
+  elements.askRailPendingCount.classList.toggle("is-hidden", counts.pending === 0);
+  elements.askRailTogglePending.classList.toggle("is-hidden", counts.pending === 0);
+  elements.askThreadEmpty.classList.toggle("is-hidden", cards.length > 0);
+  const fragment = document.createDocumentFragment();
+  cards.forEach((card, index) => fragment.append(renderAskThreadCard(card, index)));
+  elements.askThreadList.replaceChildren(fragment);
+  renderAskTextAnchors(cards);
+  syncActiveAskThreadPresentation();
+  if (state.askRailCollapsed) {
+    elements.askPanel.classList.add("is-hidden");
+    elements.askRailToggle.classList.remove("is-hidden");
+    elements.askRailToggle.setAttribute("aria-expanded", "false");
+    elements.trainingView.classList.remove("has-ask-thread");
+    document.body.classList.remove("has-ask-thread");
+  } else {
+    elements.askPanel.classList.remove("is-hidden");
+    elements.askRailToggle.classList.add("is-hidden");
+    elements.askRailToggle.setAttribute("aria-expanded", "true");
+    elements.trainingView.classList.add("has-ask-thread");
+    document.body.classList.add("has-ask-thread");
+  }
+  requestAnimationFrame(() => {
+    elements.askThreadList.scrollTop = previousScrollTop;
+    const targetCardId = focusCardId || focusedCardId;
+    const target = targetCardId
+      ? elements.askThreadList.querySelector(`[data-ask-card-id="${CSS.escape(targetCardId)}"]`)
+      : null;
+    if (focusCardId && target) {
+      target.open = true;
+      target.querySelector("textarea")?.focus({ preventScroll: true });
+      target.scrollIntoView({ block: "nearest" });
+    } else if (target && focusedAction) {
+      const control = target.querySelector(`[data-ask-action="${CSS.escape(focusedAction)}"]`);
+      control?.focus({ preventScroll: true });
+      if (control instanceof HTMLTextAreaElement && selectionStart !== null) {
+        control.setSelectionRange(selectionStart, selectionEnd);
+      }
+    }
+    state.askRailScrollTop = elements.askThreadList.scrollTop;
+    schedulePaneResizeRefresh();
+    scheduleAskPanelReposition();
+  });
+}
+
+function renderAskThreadCard(card, index) {
+  const details = document.createElement("details");
+  details.className = `ask-thread-card is-${card.status || "complete"}`;
+  details.classList.toggle("is-active", card.cardId === state.activeAskThreadId);
+  details.dataset.askCardId = card.cardId;
+  details.open = !state.collapsedAskThreadIds.has(card.cardId)
+    && (card.cardId === state.activeAskThreadId || card.status !== "complete" || index === 0);
+  details.addEventListener("toggle", () => {
+    if (details.open) {
+      state.collapsedAskThreadIds.delete(card.cardId);
+      state.activeAskThreadId = card.cardId;
+      syncActiveAskThreadPresentation();
+      scheduleAskPanelReposition();
+    } else {
+      state.collapsedAskThreadIds.add(card.cardId);
+    }
+  });
+  details.addEventListener("pointerdown", () => {
+    state.activeAskThreadId = card.cardId;
+    syncActiveAskThreadPresentation();
+    scheduleAskPanelReposition();
+  });
+
+  const summary = document.createElement("summary");
+  summary.className = "ask-thread-card-summary";
+  const summaryCopy = document.createElement("span");
+  summaryCopy.className = "ask-thread-card-summary-copy";
+  const kicker = document.createElement("span");
+  kicker.className = "ask-thread-card-kicker";
+  kicker.textContent = card.status === "pending" ? "正在回答" : card.status === "error" ? "回答失败" : "问问这处";
+  const quote = document.createElement("strong");
+  quote.className = "ask-thread-quote";
+  quote.textContent = card.learningTargetText || card.sourceText || "这处表达";
+  summaryCopy.append(kicker, quote);
+  const status = document.createElement("span");
+  status.className = `ask-thread-card-status is-${card.status || "complete"}`;
+  status.textContent = card.status === "pending" ? "生成中" : card.status === "error" ? "重试" : card.status === "draft" ? "待提问" : "已回答";
+  summary.append(summaryCopy, status);
+
+  const body = document.createElement("div");
+  body.className = "ask-thread-card-body";
+  const source = document.createElement("div");
+  source.className = "ask-thread-source";
+  const sentenceText = card.sentenceText || card.record?.sentenceText || "";
+  if (sentenceText) {
+    const sourceText = document.createElement("p");
+    sourceText.textContent = sentenceText;
+    source.append(sourceText);
+  }
+  const sourceMeta = document.createElement("span");
+  sourceMeta.className = "ask-thread-source-meta";
+  const speaker = card.speaker || card.record?.speaker || "";
+  const start = Number(card.start ?? card.record?.start);
+  sourceMeta.textContent = [speaker, Number.isFinite(start) ? formatClock(start) : ""].filter(Boolean).join(" · ") || "对应原句";
+  source.append(sourceMeta);
+  body.append(source);
+
+  const question = String(card.question || card.record?.question || "").trim();
+  if (card.status === "draft" || card.status === "error") {
+    const draft = document.createElement("div");
+    draft.className = "ask-thread-draft";
+    const label = document.createElement("label");
+    label.textContent = "你还想知道什么？";
+    const textarea = document.createElement("textarea");
+    textarea.value = question;
+    textarea.rows = 4;
+    textarea.dataset.askAction = "question";
+    textarea.addEventListener("input", () => {
+      const latest = state.askThreads.get(card.cardId);
+      if (latest) latest.question = textarea.value;
+    });
+    textarea.addEventListener("keydown", (event) => {
+      const isComposing = event.isComposing || event.keyCode === 229;
+      if (event.key !== "Enter" || event.shiftKey || isComposing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const latest = state.askThreads.get(card.cardId);
+      if (latest) latest.question = textarea.value;
+      void submitLearningQuestion(card.cardId);
+    });
+    label.append(textarea);
+    draft.append(label);
+    body.append(draft);
+  } else if (question) {
+    const questionCopy = document.createElement("p");
+    questionCopy.className = "ask-thread-question";
+    questionCopy.textContent = question;
+    body.append(questionCopy);
+  }
+
+  if (card.status === "pending") {
+    const pending = document.createElement("p");
+    pending.className = "ask-thread-status-message is-pending";
+    pending.textContent = "所选 AI 正在结合原句和前后语境回答。你可以继续问下一处。";
+    body.append(pending);
+  }
+  if (card.status === "error") {
+    const error = document.createElement("p");
+    error.className = "ask-thread-status-message is-error";
+    error.textContent = card.error || "这次没有回答成功，可以单独重试这张卡片。";
+    body.append(error);
+  }
+
+  const note = card.record || card.historyItem || (card.status === "complete" ? card : null);
+  if (note && card.status === "complete") {
+    if (note.transcriptStatus === "likely_mistranscribed" && note.likelySpokenEnglish) {
+      const reconstruction = document.createElement("div");
+      reconstruction.className = "ask-thread-reconstruction";
+      const label = document.createElement("strong");
+      label.textContent = "说话人实际最可能说的是";
+      const english = document.createElement("p");
+      english.textContent = note.likelySpokenEnglish;
+      reconstruction.append(label, english);
+      if (note.intendedMeaningZh) {
+        const meaning = document.createElement("p");
+        meaning.textContent = note.intendedMeaningZh;
+        reconstruction.append(meaning);
+      }
+      body.append(reconstruction);
+    }
+    const answer = document.createElement("div");
+    answer.className = "ask-thread-answer";
+    renderPronounceableText(answer, note.answerZh || note.learningSummaryZh || "", note.learningTargetText || note.sourceText || card.sourceText);
+    body.append(answer);
+    if (note.learningSummaryZh && normalizeReviewText(note.learningSummaryZh) !== normalizeReviewText(note.answerZh)) {
+      const knowledge = document.createElement("div");
+      knowledge.className = "ask-thread-knowledge";
+      const label = document.createElement("strong");
+      label.textContent = "知识点总结";
+      const copy = document.createElement("p");
+      renderPronounceableText(copy, note.learningSummaryZh, note.learningTargetText || note.sourceText || card.sourceText);
+      knowledge.append(label, copy);
+      body.append(knowledge);
+    }
+    if (note.grammarPointZh) {
+      const grammar = document.createElement("div");
+      grammar.className = "ask-thread-grammar";
+      const label = document.createElement("strong");
+      label.textContent = "语法点";
+      const copy = document.createElement("p");
+      copy.textContent = note.grammarPointZh;
+      grammar.append(label, copy);
+      body.append(grammar);
     }
   }
-  left = Math.max(padding, Math.min(window.innerWidth - width - padding, left));
-  elements.askPanel.dataset.anchorState = anchorState;
-  elements.askPanel.dataset.placement = placement;
-  elements.askPanel.style.left = `${Math.round(left)}px`;
-  elements.askPanel.style.top = `${Math.round(top)}px`;
-  updateAskAnchorLink(anchorState);
+
+  const actions = document.createElement("div");
+  actions.className = "ask-thread-actions";
+  const addAction = (label, action, handler) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "text-button";
+    button.textContent = label;
+    button.dataset.askAction = action;
+    button.addEventListener("click", handler);
+    actions.append(button);
+    return button;
+  };
+  if (card.status === "draft" || card.status === "error") {
+    addAction(card.status === "error" ? "重试" : "问 AI", card.status === "error" ? "retry" : "submit", () => submitLearningQuestion(card.cardId));
+    addAction("移除卡片", "dismiss", () => dismissAskThread(card.cardId));
+  }
+  if (card.status === "complete" && note) {
+    addAction("定位原句", "locate", () => returnToAskSource(card.cardId));
+    addAction("继续问", "continue", (event) => openAskPanel({
+      sentenceId: note.sentenceId || card.sentenceId,
+      sourceText: note.learningTargetText || note.sourceText || card.sourceText,
+      question: "",
+      anchorSurface: note.anchorSurface || card.anchorSurface || "",
+      anchorSurfaceText: note.anchorSurfaceText || card.anchorSurfaceText || "",
+      anchorStart: note.anchorStart ?? card.anchorStart,
+      anchorEnd: note.anchorEnd ?? card.anchorEnd,
+      anchorExact: note.anchorExact || card.anchorExact || "",
+      prefix: note.prefix ?? card.prefix ?? "",
+      suffix: note.suffix ?? card.suffix ?? "",
+    }, event.currentTarget));
+    const review = findQuestionHistoryReview(note);
+    const reviewButton = addAction(review ? "已加入复习" : "加入复习", "review", (event) => {
+      toggleQuestionHistoryReview(note, event.currentTarget, card.materialId);
+    });
+    reviewButton.classList.toggle("is-saved", Boolean(review));
+    addAction("删除记录", "delete", (event) => deleteQuestionHistoryRecord(note, event.currentTarget, card.materialId));
+  }
+  body.append(actions);
+  details.append(summary, body);
+  return details;
 }
 
-function repositionOpenAskPanel() {
-  if (elements.askPanel.classList.contains("is-hidden")) return;
-  const anchorElement = resolveAskAnchorElement();
-  setAskAnchorElement(anchorElement);
-  const nextRect = anchorElement?.isConnected ? snapshotRect(anchorElement.getBoundingClientRect()) : null;
-  state.askAnchorRect = nextRect;
-  positionAskPanel(nextRect);
+function dismissAskThread(cardId) {
+  const card = state.askThreads.get(cardId);
+  if (!card || card.status === "pending") return;
+  state.askThreads.delete(cardId);
+  state.collapsedAskThreadIds.delete(cardId);
+  if (state.activeAskThreadId === cardId) state.activeAskThreadId = null;
+  renderAskRail({ preserveScroll: true });
 }
 
-function scheduleAskPanelReposition() {
-  if (elements.askPanel.classList.contains("is-hidden") || state.askRepositionFrame) return;
-  state.askRepositionFrame = requestAnimationFrame(() => {
-    state.askRepositionFrame = null;
-    repositionOpenAskPanel();
-  });
+async function submitLearningQuestion(cardId) {
+  const card = state.askThreads.get(cardId);
+  if (!card || !["draft", "error"].includes(card.status)) return;
+  const question = String(card.question || "").trim();
+  if (!question) return showToast("请输入你想继续了解的问题");
+  const requestToken = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  const materialId = card.materialId;
+  Object.assign(card, { question, status: "pending", error: "", requestToken });
+  state.activeAskThreadId = cardId;
+  stopPronunciation();
+  renderAskRail({ preserveScroll: true });
+  try {
+    const payload = await api(`/api/materials/${materialId}/ask`, {
+      method: "POST",
+      body: {
+        sentenceId: card.sentenceId,
+        selectedText: card.sourceText,
+        question,
+        ...askTextAnchorPayload(card),
+      },
+    });
+    const latest = state.askThreads.get(cardId);
+    if (!isAskRequestTokenCurrent(latest, requestToken, materialId)) return;
+    const historyItem = payload.historyItem || { ...payload.answer, id: "", createdAt: new Date().toISOString() };
+    Object.assign(latest, {
+      status: "complete",
+      historyId: historyItem.id || "",
+      historyItem: { ...historyItem, materialId },
+      answer: payload.answer,
+      error: "",
+    });
+    if (payload.historyItem) {
+      state.askThreads.delete(cardId);
+      if (state.material?.id === materialId) {
+        state.material.qaHistory = Array.isArray(state.material.qaHistory) ? state.material.qaHistory : [];
+        if (!state.material.qaHistory.some((item) => item.id === payload.historyItem.id)) {
+          state.material.qaHistory.push(payload.historyItem);
+        }
+        const historyCardId = `history:${payload.historyItem.id}`;
+        if (state.activeAskThreadId === cardId) state.activeAskThreadId = historyCardId;
+        if (state.revealed && currentUnit()) renderAnalysis(currentUnit());
+      }
+    }
+    renderAskRail({ preserveScroll: true });
+  } catch (error) {
+    const latest = state.askThreads.get(cardId);
+    if (!isAskRequestTokenCurrent(latest, requestToken, materialId)) return;
+    Object.assign(latest, { status: "error", error: error.message || "回答失败" });
+    renderAskRail({ preserveScroll: true, focusCardId: cardId });
+  }
 }
 
 function resolveInitialAskAnchor(context, anchorElement) {
@@ -2084,23 +3873,208 @@ function resolveInitialAskAnchor(context, anchorElement) {
   return anchorElement?.closest?.(".sentence-study-item")?.querySelector(".sentence-study-original") || null;
 }
 
-function resolveAskAnchorElement() {
-  if (state.askAnchorElement?.isConnected && state.askAnchorElement.getClientRects().length) {
+function renderAskTextAnchors(cards = askCardsForMaterial()) {
+  const surfaces = [...document.querySelectorAll(".askable-sentence[data-sentence-id]")];
+  surfaces.forEach(clearAskTextAnchorSurface);
+  const plainSurfaces = surfaces.filter((surface) => (
+    askAnchorSurface(surface) !== "dictation-diff"
+    && !surface.querySelector("*")
+  ));
+  const legacySurfaceByCardId = new Map();
+  cards.filter((card) => !card.anchorSurface).forEach((card) => {
+    const candidates = plainSurfaces.filter((surface) => (
+      surface.dataset.sentenceId === card.sentenceId
+      && resolveTextAnchor(surface.textContent || "", card)
+    ));
+    const exactSurfaceMatches = candidates.filter((surface) => (
+      normalizeReviewText(surface.textContent) === normalizeReviewText(card.sourceText)
+    ));
+    const resolvedSurface = exactSurfaceMatches.length === 1
+      ? exactSurfaceMatches[0]
+      : candidates.length === 1 ? candidates[0] : null;
+    if (resolvedSurface) legacySurfaceByCardId.set(card.cardId, resolvedSurface);
+  });
+
+  plainSurfaces.forEach((surface) => {
+    const surfaceText = surface.textContent || "";
+    const surfaceKind = askAnchorSurface(surface);
+    const relevantCards = cards.filter((card) => (
+      card.sentenceId === surface.dataset.sentenceId
+      && (card.anchorSurface
+        ? card.anchorSurface === surfaceKind
+        : legacySurfaceByCardId.get(card.cardId) === surface)
+    ));
+    const segments = segmentTextAnchors(surfaceText, relevantCards.map((card) => ({
+      ...card,
+      id: card.cardId,
+    })));
+    if (!segments.some((segment) => segment.anchorIds.length)) return;
+    const fragment = document.createDocumentFragment();
+    segments.forEach((segment) => {
+      if (!segment.anchorIds.length) {
+        fragment.append(document.createTextNode(segment.text));
+        return;
+      }
+      fragment.append(createAskTextAnchorMarker(segment.text, segment.anchorIds));
+    });
+    surface.replaceChildren(fragment);
+  });
+  surfaces.filter((surface) => askAnchorSurface(surface) === "dictation-diff").forEach((surface) => {
+    const surfaceText = surface.textContent || "";
+    const relevantCards = cards.filter((card) => (
+      card.sentenceId === surface.dataset.sentenceId
+      && card.anchorSurface === "dictation-diff"
+    ));
+    const anchorSegments = segmentTextAnchors(surfaceText, relevantCards.map((card) => ({
+      ...card,
+      id: card.cardId,
+    })));
+    if (!anchorSegments.some((segment) => segment.anchorIds.length)) return;
+    renderStructuredAskTextAnchorSurface(surface, surfaceText, anchorSegments);
+  });
+  syncActiveAskThreadPresentation();
+}
+
+function clearAskTextAnchorSurface(surface) {
+  surface.querySelectorAll(".ask-text-anchor").forEach((marker) => {
+    const semanticClass = marker.classList.contains("is-missed")
+      ? "is-missed"
+      : marker.classList.contains("is-match") ? "is-match" : "";
+    if (askAnchorSurface(surface) === "dictation-diff" && semanticClass) {
+      const semanticSpan = document.createElement("span");
+      semanticSpan.className = semanticClass;
+      semanticSpan.textContent = marker.textContent || "";
+      marker.replaceWith(semanticSpan);
+    } else {
+      marker.replaceWith(document.createTextNode(marker.textContent || ""));
+    }
+  });
+  surface.normalize();
+}
+
+function createAskTextAnchorMarker(text, cardIds, semanticClass = "") {
+  const marker = document.createElement("span");
+  marker.className = "ask-text-anchor";
+  if (semanticClass) marker.classList.add(semanticClass);
+  marker.textContent = text;
+  marker.dataset.askCardIds = cardIds.join(" ");
+  if (cardIds.length === 1) marker.dataset.askCardId = cardIds[0];
+  marker.tabIndex = 0;
+  marker.setAttribute("role", "button");
+  marker.setAttribute("aria-label", `打开与“${text}”相关的问问`);
+  marker.addEventListener("click", (event) => activateAskTextAnchor(event.currentTarget));
+  marker.addEventListener("keydown", (event) => {
+    if (!["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    activateAskTextAnchor(event.currentTarget);
+  });
+  return marker;
+}
+
+function renderStructuredAskTextAnchorSurface(surface, surfaceText, anchorSegments) {
+  const semanticRanges = [];
+  let cursor = 0;
+  [...surface.childNodes].forEach((node) => {
+    const text = node.textContent || "";
+    const semanticClass = node.nodeType === Node.ELEMENT_NODE
+      ? node.classList.contains("is-missed")
+        ? "is-missed"
+        : node.classList.contains("is-match") ? "is-match" : ""
+      : "";
+    if (semanticClass && text) semanticRanges.push({ start: cursor, end: cursor + text.length, semanticClass });
+    cursor += text.length;
+  });
+  const boundaries = [...new Set([
+    0,
+    surfaceText.length,
+    ...semanticRanges.flatMap(({ start, end }) => [start, end]),
+    ...anchorSegments.flatMap(({ start, end }) => [start, end]),
+  ])].sort((left, right) => left - right);
+  const fragment = document.createDocumentFragment();
+  for (let index = 0; index < boundaries.length - 1; index += 1) {
+    const start = boundaries[index];
+    const end = boundaries[index + 1];
+    if (end <= start) continue;
+    const text = surfaceText.slice(start, end);
+    const semanticClass = semanticRanges.find((range) => range.start <= start && range.end >= end)?.semanticClass || "";
+    const cardIds = anchorSegments.find((segment) => segment.start <= start && segment.end >= end)?.anchorIds || [];
+    if (cardIds.length) {
+      fragment.append(createAskTextAnchorMarker(text, cardIds, semanticClass));
+    } else if (semanticClass) {
+      const semanticSpan = document.createElement("span");
+      semanticSpan.className = semanticClass;
+      semanticSpan.textContent = text;
+      fragment.append(semanticSpan);
+    } else {
+      fragment.append(document.createTextNode(text));
+    }
+  }
+  surface.replaceChildren(fragment);
+}
+
+function askTextAnchorCardIds(marker) {
+  return String(marker?.dataset?.askCardIds || "").split(/\s+/).filter(Boolean);
+}
+
+function findAskTextAnchorElement(cardId) {
+  if (!cardId) return null;
+  return [...document.querySelectorAll(".ask-text-anchor[data-ask-card-ids]")]
+    .find((marker) => askTextAnchorCardIds(marker).includes(cardId) && marker.getClientRects().length) || null;
+}
+
+function activateAskTextAnchor(marker) {
+  const cardIds = askTextAnchorCardIds(marker);
+  if (!cardIds.length) return;
+  const cardId = cardIds.includes(state.activeAskThreadId) ? state.activeAskThreadId : cardIds[0];
+  if (!askCardById(cardId)) return;
+  state.activeAskThreadId = cardId;
+  state.askRailCollapsed = false;
+  renderAskRail({ preserveScroll: true, focusCardId: cardId });
+}
+
+function syncActiveAskThreadPresentation() {
+  document.querySelectorAll(".ask-thread-card[data-ask-card-id]").forEach((card) => {
+    card.classList.toggle("is-active", card.dataset.askCardId === state.activeAskThreadId);
+  });
+  document.querySelectorAll(".ask-text-anchor[data-ask-card-ids]").forEach((marker) => {
+    marker.classList.toggle("is-active", askTextAnchorCardIds(marker).includes(state.activeAskThreadId));
+  });
+  const card = askCardById(state.activeAskThreadId);
+  const preciseAnchor = findAskTextAnchorElement(state.activeAskThreadId);
+  setAskAnchorElement(preciseAnchor || (!card?.anchorExact ? resolveAskAnchorElement(card) : null));
+}
+
+function resolveAskAnchorElement(card = askCardById(state.activeAskThreadId)) {
+  if (!card) return null;
+  const preciseAnchor = findAskTextAnchorElement(card.cardId);
+  if (preciseAnchor) return preciseAnchor;
+  if (state.askAnchorElement?.isConnected
+    && state.askAnchorElement.dataset.sentenceId === card.sentenceId
+    && !state.askAnchorElement.classList.contains("ask-text-anchor")
+    && !card.anchorExact
+    && state.askAnchorElement.getClientRects().length) {
     return state.askAnchorElement;
   }
-  const sentenceId = state.askContext?.sentenceId;
-  const sourceKey = normalizeReviewText(state.askContext?.sourceText || "");
-  const anchorSurface = state.askContext?.anchorSurface || "";
-  if (!sentenceId) return null;
+  const sourceKey = normalizeReviewText(card.learningTargetText || card.sourceText || "");
+  const anchorSurface = card.anchorSurface || "";
   const candidates = [...document.querySelectorAll(".askable-sentence[data-sentence-id]")]
-    .filter((element) => element.dataset.sentenceId === sentenceId && element.getClientRects().length);
-  const sameSurface = anchorSurface
-    ? candidates.filter((element) => askAnchorSurface(element) === anchorSurface)
-    : [];
+    .filter((element) => element.dataset.sentenceId === card.sentenceId && element.getClientRects().length);
+  const sameSurface = anchorSurface ? candidates.filter((element) => askAnchorSurface(element) === anchorSurface) : [];
   const preferred = sameSurface.length ? sameSurface : candidates;
   const exact = preferred.find((element) => normalizeReviewText(element.textContent) === sourceKey);
   const containing = preferred.find((element) => normalizeReviewText(element.textContent).includes(sourceKey));
   return exact || containing || preferred.find((element) => element.classList.contains("sentence-study-original")) || preferred[0] || null;
+}
+
+function scheduleAskPanelReposition() {
+  if (state.askRepositionFrame) return;
+  state.askRepositionFrame = requestAnimationFrame(() => {
+    state.askRepositionFrame = null;
+    const card = askCardById(state.activeAskThreadId);
+    const target = resolveAskAnchorElement(card);
+    setAskAnchorElement(target?.classList.contains("ask-text-anchor") || !card?.anchorExact ? target : null);
+  });
 }
 
 function askAnchorSurface(element) {
@@ -2110,47 +4084,53 @@ function askAnchorSurface(element) {
 
 function setAskAnchorElement(element) {
   if (state.askAnchorElement === element) return;
-  state.askAnchorElement?.classList?.remove("is-ask-anchor");
+  state.askAnchorElement?.classList?.remove("is-ask-anchor", "is-active");
   state.askAnchorElement = element?.isConnected ? element : null;
-  state.askAnchorElement?.classList?.add("is-ask-anchor");
+  if (state.askAnchorElement) {
+    state.askAnchorElement.classList.add(
+      state.askAnchorElement.classList.contains("ask-text-anchor") ? "is-active" : "is-ask-anchor",
+    );
+  }
 }
 
-function updateAskAnchorLink(anchorState) {
-  const isVisible = anchorState === "visible";
-  elements.askAnchorLink.classList.toggle("is-hidden", isVisible);
-  if (isVisible) return;
-  elements.askAnchorStatus.textContent = anchorState === "above"
-    ? "原句在上方"
-    : anchorState === "below" ? "原句在下方" : "原句不在当前片段";
-}
-
-function returnToAskSource() {
-  let anchorElement = resolveAskAnchorElement();
-  if (!anchorElement && state.askContext?.sentenceId && state.material) {
+function returnToAskSource(cardId) {
+  const card = askCardById(cardId);
+  if (!card || !state.material || card.materialId !== state.material.id) return showToast("请先回到这条问问所属的材料");
+  state.activeAskThreadId = cardId;
+  let anchorElement = resolveAskAnchorElement(card);
+  if (!anchorElement && card.sentenceId) {
     let units = currentUnits();
-    let targetIndex = units.findIndex((unit) => unitSentenceIds(unit).includes(state.askContext.sentenceId));
-    if (targetIndex < 0 && state.reviewOnly) {
-      state.reviewOnly = false;
-      elements.reviewFilterButton.setAttribute("aria-pressed", "false");
-      units = currentUnits();
-      targetIndex = units.findIndex((unit) => unitSentenceIds(unit).includes(state.askContext.sentenceId));
-    }
+    let targetIndex = units.findIndex((unit) => unitSentenceIds(unit).includes(card.sentenceId));
     if (targetIndex >= 0) {
-      state.index = targetIndex;
+      if (!inReviewMode()) state.index = targetIndex;
       state.revealed = true;
       renderCurrentUnit();
-      anchorElement = resolveAskAnchorElement();
+      anchorElement = resolveAskAnchorElement(card);
     }
   }
   requestAnimationFrame(() => {
-    const target = anchorElement?.isConnected ? anchorElement : resolveAskAnchorElement();
+    const target = anchorElement?.isConnected ? anchorElement : resolveAskAnchorElement(card);
     if (!target) return showToast("暂时找不到这处原文");
-    setAskAnchorElement(target);
-    target.scrollIntoView({
-      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-      block: "center",
-    });
+    setAskAnchorElement(target.classList.contains("ask-text-anchor") || !card.anchorExact ? target : null);
+    scrollAskSourceIntoView(target);
     scheduleAskPanelReposition();
+  });
+}
+
+function scrollAskSourceIntoView(target) {
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (window.innerWidth > 1060 && elements.practiceColumn) {
+    const containerRect = elements.practiceColumn.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const top = elements.practiceColumn.scrollTop + targetRect.top - containerRect.top
+      - (elements.practiceColumn.clientHeight - targetRect.height) / 2;
+    elements.practiceColumn.scrollTo({ top: Math.max(0, top), behavior: reduceMotion ? "auto" : "smooth" });
+    return;
+  }
+  const targetRect = target.getBoundingClientRect();
+  window.scrollTo({
+    top: Math.max(0, window.scrollY + targetRect.top - (window.innerHeight - targetRect.height) / 2),
+    behavior: reduceMotion ? "auto" : "smooth",
   });
 }
 
@@ -2173,129 +4153,11 @@ function snapshotRect(rect) {
 
 function handleViewportScroll(event) {
   hideSelectionAction();
-  if (elements.askPanel.classList.contains("is-hidden")) return;
-  if (event.target === elements.askPanel || elements.askPanel.contains(event.target)) return;
+  if (event.target === elements.askThreadList || elements.askThreadList.contains(event.target)) {
+    state.askRailScrollTop = elements.askThreadList.scrollTop;
+    return;
+  }
   scheduleAskPanelReposition();
-}
-
-async function submitLearningQuestion() {
-  const question = elements.askQuestionInput.value.trim();
-  const sentenceId = state.askContext?.sentenceId || elements.askPanel.dataset.sentenceId || "";
-  const sourceText = state.askContext?.sourceText
-    || elements.askPanel.dataset.sourceText
-    || elements.askSourceText.textContent.trim();
-  if (!sentenceId || !sourceText) return showToast("请先选择或指定想问的内容");
-  if (!question) return showToast("请输入你想继续了解的问题");
-  const materialId = state.material.id;
-  const requestId = ++state.askRequestId;
-  state.askContext = {
-    ...state.askContext,
-    materialId,
-    sentenceId,
-    sourceText,
-  };
-  stopPronunciation();
-  elements.askSubmitButton.disabled = true;
-  elements.askPanel.setAttribute("aria-busy", "true");
-  elements.askStatusText.textContent = "Codex 正在结合原句和前后语境回答…";
-  try {
-    const payload = await api(`/api/materials/${materialId}/ask`, {
-      method: "POST",
-      body: {
-        sentenceId,
-        selectedText: sourceText,
-        question,
-      },
-    });
-    if (payload.historyItem && state.material?.id === materialId) {
-      state.material.qaHistory = Array.isArray(state.material.qaHistory) ? state.material.qaHistory : [];
-      if (!state.material.qaHistory.some((item) => item.id === payload.historyItem.id)) {
-        state.material.qaHistory.push(payload.historyItem);
-      }
-      state.askHistoryDirty = true;
-    }
-    const isCurrentRequest = requestId === state.askRequestId
-      && !elements.askPanel.classList.contains("is-hidden")
-      && state.askContext?.materialId === materialId;
-    if (!isCurrentRequest) {
-      if (payload.historyItem && state.material?.id === materialId) {
-        if (elements.askPanel.classList.contains("is-hidden") && state.revealed && currentUnit()) {
-          state.askHistoryDirty = false;
-          renderAnalysis(currentUnit());
-        }
-        showToast(elements.askPanel.classList.contains("is-hidden")
-          ? "刚才的回答已保存到对应词条"
-          : "上一条回答已保存到对应词条");
-      }
-      return;
-    }
-    state.askAnswer = {
-      ...payload.answer,
-      historyId: payload.historyItem?.id || "",
-    };
-    const hasReconstruction = hasTranscriptReconstruction(payload.answer);
-    elements.askReconstructionBlock.classList.toggle("is-hidden", !hasReconstruction);
-    elements.askReconstructedEnglish.textContent = hasReconstruction ? payload.answer.likelySpokenEnglish : "";
-    elements.askReconstructedMeaning.textContent = hasReconstruction ? payload.answer.intendedMeaningZh : "";
-    const grammarPoint = String(payload.answer.grammarPointZh || "").trim();
-    elements.askGrammarPoint.classList.toggle("is-hidden", !grammarPoint);
-    elements.askGrammarPointText.textContent = grammarPoint;
-    renderPronounceableText(elements.askAnswerText, payload.answer.answerZh, payload.answer.selectedText || sourceText);
-    renderPronounceableText(elements.askSummaryText, payload.answer.learningSummaryZh, payload.answer.selectedText || sourceText);
-    elements.askAnswerBlock.classList.remove("is-hidden");
-    elements.saveQaReviewButton.disabled = false;
-    elements.saveQaReviewButton.textContent = hasReconstruction ? "将还原表达加入复习" : "加入复习";
-    elements.askStatusText.textContent = "已结合当前语境回答。";
-    requestAnimationFrame(() => {
-      scheduleAskPanelReposition();
-      elements.askPanel.scrollTo({
-        top: Math.max(0, elements.askAnswerBlock.offsetTop - 14),
-        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-      });
-    });
-  } catch (error) {
-    if (requestId === state.askRequestId) {
-      elements.askStatusText.textContent = "这次没有回答成功，可以重试。";
-      showToast(error.message);
-    }
-  } finally {
-    if (requestId === state.askRequestId) {
-      elements.askSubmitButton.disabled = false;
-      elements.askPanel.setAttribute("aria-busy", "false");
-    }
-  }
-}
-
-async function saveQaReview() {
-  if (!state.askAnswer || !state.askContext) return;
-  elements.saveQaReviewButton.disabled = true;
-  try {
-    const sourceText = resolvedLearningSource(state.askAnswer, state.askContext.sourceText);
-    const payload = await api(`/api/materials/${state.material.id}/review-items`, {
-      method: "POST",
-      body: {
-        kind: "qa",
-        historyId: state.askAnswer.historyId || undefined,
-        sentenceId: state.askAnswer.sentenceId,
-        sourceText,
-        question: state.askAnswer.question,
-        answerZh: state.askAnswer.answerZh,
-        learningSummaryZh: state.askAnswer.learningSummaryZh,
-        grammarPointZh: state.askAnswer.grammarPointZh || "",
-      },
-    });
-    state.material = payload.material;
-    state.askHistoryDirty = false;
-    elements.saveQaReviewButton.textContent = "已加入复习";
-    renderAnalysis(currentUnit());
-    showToast(hasTranscriptReconstruction(state.askAnswer)
-      ? "已把还原后的真实表达加入对应自然句复习"
-      : "这次追问已加入对应自然句的复习总结");
-    loadMaterials();
-  } catch (error) {
-    elements.saveQaReviewButton.disabled = false;
-    showToast(error.message);
-  }
 }
 
 function renderDiff(typed, target) {
@@ -2330,20 +4192,107 @@ function renderDiff(typed, target) {
   });
 }
 
-function setSpeed(speed) {
-  state.speed = speed;
-  if (state.media) state.media.playbackRate = speed;
-  document.querySelectorAll("[data-speed]").forEach((button) => button.classList.toggle("is-active", Number(button.dataset.speed) === speed));
+function renderPracticeProgress(sequencePosition, sequenceLength) {
+  if (!sequenceLength) {
+    const emptyLabel = inReviewMode() ? "没有需复习的片段" : "没有可学习的片段";
+    elements.unitCounter.textContent = emptyLabel;
+    elements.studyProgress.style.width = "0%";
+    elements.practiceProgress.setAttribute("aria-valuemax", "0");
+    elements.practiceProgress.setAttribute("aria-valuenow", "0");
+    elements.practiceProgress.setAttribute("aria-valuetext", emptyLabel);
+    return;
+  }
+  elements.unitCounter.textContent = `${sequencePosition} / ${sequenceLength}`;
+  elements.studyProgress.style.width = `${(sequencePosition / sequenceLength) * 100}%`;
+  elements.practiceProgress.setAttribute("aria-valuemax", String(sequenceLength));
+  elements.practiceProgress.setAttribute("aria-valuenow", String(sequencePosition));
+  elements.practiceProgress.setAttribute(
+    "aria-valuetext",
+    inReviewMode()
+      ? `当前复习第 ${sequencePosition} 项，共 ${sequenceLength} 项`
+      : `当前第 ${sequencePosition} 段，共 ${sequenceLength} 段`,
+  );
 }
 
-function toggleReviewFilter() {
-  state.reviewOnly = !state.reviewOnly;
-  state.index = 0;
-  state.revealed = false;
-  elements.reviewFilterButton.setAttribute("aria-pressed", String(state.reviewOnly));
-  renderCurrentUnit();
-  updateResumeButton();
-  requestAnimationFrame(() => scrollTrainingWorkspaceToTop());
+function startCompletionPlaybackPass(unit) {
+  if (!unit || !state.material || inReviewMode() || state.sentencePlayback) {
+    state.completionPlaybackPass = null;
+    return;
+  }
+  const finalParagraph = state.material.paragraphs.at(-1);
+  if (!finalParagraph || finalParagraph.id !== unit.id) {
+    state.completionPlaybackPass = null;
+    return;
+  }
+  state.completionPlaybackPass = {
+    materialId: state.material.id,
+    paragraphId: unit.id,
+    surface: "paragraph-player",
+    mediaKind: "original",
+    startedFromBeginning: true,
+    reachedContentEnd: false,
+    endedNaturally: false,
+    endedBySeek: false,
+    startedAt: new Date().toISOString(),
+  };
+}
+
+function invalidateCompletionPlaybackPass(patch = {}) {
+  if (!state.completionPlaybackPass) return;
+  state.completionPlaybackPass = { ...state.completionPlaybackPass, ...patch };
+}
+
+async function completeMaterialAfterNaturalPlayback(unit) {
+  const material = state.material;
+  const pass = state.completionPlaybackPass;
+  if (!material || !unit || !pass || state.completionSaving) return;
+  const completedPass = {
+    ...pass,
+    reachedContentEnd: true,
+    endedNaturally: true,
+  };
+  state.completionPlaybackPass = completedPass;
+  const completion = {
+    ...normalizeMaterialCompletion(material),
+    replayRequiredAfter: loadCompletionResetAt(material.id),
+  };
+  const eligible = shouldCompleteMaterial({
+    completion,
+    mode: state.studyPreferences.mode,
+    reviewFilterActive: inReviewMode(),
+    paragraphs: material.paragraphs,
+    paragraphId: unit.id,
+    playbackPass: completedPass,
+  });
+  if (!eligible) return;
+
+  state.completionSaving = true;
+  const previousCompleted = material.completed === true;
+  const previousCompletedAt = material.completedAt || null;
+  const completedMaterialId = material.id;
+  const completedMaterialTitle = material.title;
+  const optimisticCompletedAt = new Date().toISOString();
+  applyMaterialLearningState(material.id, { completed: true, completedAt: optimisticCompletedAt });
+  renderMaterialList();
+  renderMaterialCompletionState();
+  try {
+    const payload = await api(`/api/materials/${material.id}/learning-state`, {
+      method: "PATCH",
+      body: { completed: true },
+    });
+    applyMaterialLearningState(material.id, payload.material);
+    clearCompletionResetAt(material.id);
+    renderMaterialList();
+    renderMaterialCompletionState();
+    showCompletionCelebration({ materialId: completedMaterialId, title: completedMaterialTitle });
+  } catch (error) {
+    applyMaterialLearningState(material.id, { completed: previousCompleted, completedAt: previousCompletedAt });
+    renderMaterialList();
+    renderMaterialCompletionState();
+    showToast(`已听完最后一段，但完成状态保存失败：${error.message}`);
+  } finally {
+    state.completionSaving = false;
+  }
 }
 
 async function togglePlayback() {
@@ -2357,8 +4306,10 @@ async function togglePlayback() {
   if (media.currentTime < playbackRange.start - 0.2 || media.currentTime >= playbackRange.end) {
     media.currentTime = Math.max(0, playbackRange.start - 0.08);
     state.playbackPassEligible = true;
+    startCompletionPlaybackPass(unit);
   } else if (media.currentTime <= playbackRange.start + 0.12) {
     state.playbackPassEligible = true;
+    startCompletionPlaybackPass(unit);
   }
   const requestId = ++state.playRequestId;
   const expectedMode = state.mode;
@@ -2377,6 +4328,10 @@ async function togglePlayback() {
 async function toggleSentencePlayback(sentence, button) {
   const media = state.media;
   if (!media || !sentence) return;
+  if (!hasReliableSentencePlayback(sentence, media.duration)) {
+    showToast("这句未能在原声中可靠匹配，已避免播放错误片段");
+    return;
+  }
   if (state.sentencePlayback?.button === button && !media.paused) {
     pauseMedia();
     return;
@@ -2386,6 +4341,7 @@ async function toggleSentencePlayback(sentence, button) {
   pauseMedia();
   stopPronunciation();
   state.playbackPassEligible = false;
+  state.completionPlaybackPass = null;
   const requestId = ++state.playRequestId;
   const expectedMaterialId = state.material?.id;
   const playbackRange = resolveSentencePlaybackRange({
@@ -2454,6 +4410,7 @@ function playUnitFromStart(unit = currentUnit()) {
     ) return;
     media.currentTime = Math.max(0, playbackRange.start - 0.08);
     state.playbackPassEligible = true;
+    startCompletionPlaybackPass(unit);
     media.playbackRate = state.speed;
     updateUnitPlaybackProgress();
     media.play().catch(() => showToast("浏览器暂时无法播放该片段"));
@@ -2520,15 +4477,17 @@ function updateUnitPlaybackProgress() {
   if (targetCompletion >= 0.9 && state.playbackPassEligible && state.media && !state.media.paused) markUnitHeard(unit);
 }
 
-function enforceUnitBoundary() {
+function enforceUnitBoundary(force = false) {
   const unit = currentUnit();
   const playbackRange = currentPlaybackRange(unit);
-  if (!unit || !playbackRange || !state.media || state.media.currentTime < playbackRange.end + 0.04) return;
+  if (!unit || !playbackRange || !state.media || (!force && state.media.currentTime < playbackRange.end + 0.04)) return;
   if (state.playbackPassEligible) markUnitHeard(unit);
+  completeMaterialAfterNaturalPlayback(unit);
   if (document.hidden || elements.trainingView.classList.contains("is-hidden")) return pauseMedia();
   if (state.loop) {
     state.media.currentTime = Math.max(0, playbackRange.start - 0.08);
     state.playbackPassEligible = true;
+    startCompletionPlaybackPass(unit);
     updateUnitPlaybackProgress();
     state.media.play().catch(() => {});
   } else {
@@ -2544,6 +4503,7 @@ function startPlaybackSeek(event) {
   state.playbackSeekPointerId = event.pointerId;
   state.playbackSeekWasPlaying = !state.media.paused;
   state.playbackPassEligible = false;
+  invalidateCompletionPlaybackPass({ endedBySeek: true });
   pauseMedia();
   elements.unitPlaybackTrack.focus({ preventScroll: true });
   elements.unitPlaybackTrack.setPointerCapture(event.pointerId);
@@ -2583,6 +4543,7 @@ function seekCurrentUnitToRatio(value) {
   if (!unit || !playbackRange || !state.media) return;
   const ratio = Math.max(0, Math.min(1, Number(value) || 0));
   state.playbackPassEligible = false;
+  invalidateCompletionPlaybackPass({ endedBySeek: true });
   state.media.currentTime = playbackRange.start + (playbackRange.end - playbackRange.start) * ratio;
   updateUnitPlaybackProgress();
 }
@@ -2639,6 +4600,7 @@ function clearSentencePlaybackState() {
 
 function disposeMedia() {
   stopPronunciation();
+  state.completionPlaybackPass = null;
   state.playRequestId += 1;
   const media = state.media;
   if (!media) return;
@@ -2807,8 +4769,16 @@ function renderLoopState() {
   elements.loopButton.setAttribute("aria-pressed", String(state.loop));
 }
 
-function navigateUnit(delta, autoplay = false, { resetScroll = true } = {}) {
+async function navigateUnit(delta, autoplay = false, { resetScroll = true } = {}) {
   saveDictationNow();
+  if (inReviewMode()) {
+    if (!state.reviewQueue.length) return;
+    const next = Math.min(Math.max(0, state.reviewQueueIndex + delta), state.reviewQueue.length - 1);
+    if (next === state.reviewQueueIndex && delta > 0) return showToast("已经是本轮复习的最后一条");
+    if (next === state.reviewQueueIndex && delta < 0) return showToast("已经是本轮复习的第一条");
+    await activateReviewQueueIndex(next, { autoplay, resetScroll });
+    return;
+  }
   const units = currentUnits();
   if (!units.length) return;
   const next = Math.min(Math.max(0, state.index + delta), units.length - 1);
@@ -2826,6 +4796,8 @@ function navigateUnit(delta, autoplay = false, { resetScroll = true } = {}) {
 async function toggleCurrentReview() {
   const unit = currentUnit();
   if (!unit) return;
+  const previousReviewKey = currentReviewQueueItem()?.key || "";
+  const previousReviewIndex = state.reviewQueueIndex;
   const saved = findParagraphReview(unit.id);
   const wasSaved = Boolean(saved);
   elements.markReviewButton.disabled = true;
@@ -2846,10 +4818,18 @@ async function toggleCurrentReview() {
       state.material = payload.material;
     }
 
-    renderCurrentUnit();
+    if (inReviewMode()) {
+      await syncReviewQueueAfterReviewMutation({
+        previousReviewKey,
+        previousReviewIndex,
+        materialId: state.material.id,
+      });
+    } else {
+      renderCurrentUnit();
+    }
     loadMaterials();
     if (!wasSaved) {
-      showToast("本段已加入复习，可在「只听需复习」中继续");
+      showToast("本段已加入复习，可在复习模式中继续");
     } else if (paragraphContainsReview(unit)) {
       showToast("已移除本段复习，句内复习内容仍保留");
     } else {
@@ -2919,6 +4899,7 @@ function isInlineSegmentDrawer() {
 }
 
 function applyInitialSegmentDrawerState() {
+  if (state.mediaViewMode === MEDIA_VIEW_LISTEN) return closeSegmentDrawer(false);
   openSegmentDrawer({ focus: false });
 }
 
@@ -2931,7 +4912,10 @@ function syncSegmentDrawerPresentation() {
 }
 
 function openSegmentDrawer({ focus = true } = {}) {
-  if (!state.material) return;
+  if (!state.material || state.mediaViewMode === MEDIA_VIEW_LISTEN) return;
+  if (window.innerWidth < 1880 && !elements.askPanel.classList.contains("is-hidden")) {
+    collapseAskRail(false);
+  }
   if (focus) state.drawerReturnFocus = document.activeElement;
   renderSegmentDirectory();
   elements.segmentDrawer.inert = false;
@@ -2959,6 +4943,45 @@ function closeSegmentDrawer(restoreFocus = true) {
 }
 
 function renderSegmentDirectory() {
+  if (inReviewMode()) {
+    const units = state.reviewQueue;
+    const scopeLabel = state.studyPreferences.reviewScope.kind === "material"
+      ? state.materials.find((material) => material.id === state.studyPreferences.reviewScope.materialId)?.title || "当前材料"
+      : "全部材料";
+    elements.segmentModeLabel.textContent = `复习 · ${scopeLabel}`;
+    elements.segmentHeardSummary.textContent = `${units.length} 条待复习`;
+    elements.segmentList.replaceChildren();
+    const numberWidth = String(Math.max(1, units.length)).length;
+    const fragment = document.createDocumentFragment();
+    units.forEach((item, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "segment-row is-review";
+      button.setAttribute("aria-current", String(index === state.reviewQueueIndex));
+      button.setAttribute("aria-label", `第 ${index + 1} 条复习内容，${item.materialTitle}，${item.speaker || "Speaker"}`);
+      const number = document.createElement("span");
+      number.className = "segment-number";
+      number.textContent = String(index + 1).padStart(numberWidth, "0");
+      const details = document.createElement("span");
+      details.className = "segment-details";
+      const speaker = document.createElement("strong");
+      speaker.textContent = item.materialTitle || "未命名材料";
+      const timing = document.createElement("span");
+      timing.textContent = `${item.speaker || "Speaker"} · ${formatClock(item.start)}–${formatClock(item.end)}`;
+      details.append(speaker, timing);
+      const status = document.createElement("span");
+      status.className = "segment-state";
+      status.textContent = index === state.reviewQueueIndex ? "当前" : "需复习";
+      button.append(number, details, status);
+      button.addEventListener("click", () => {
+        void activateReviewQueueIndex(index, { autoplay: true, resetScroll: true });
+        if (!isInlineSegmentDrawer()) closeSegmentDrawer(false);
+      });
+      fragment.append(button);
+    });
+    elements.segmentList.append(fragment);
+    return;
+  }
   const units = currentUnits();
   const modeLabel = "自然分段";
   const heardCount = units.filter(unitIsHeard).length;
@@ -3026,6 +5049,7 @@ function jumpToUnit(index) {
 }
 
 function saveStudyPosition() {
+  if (inReviewMode()) return;
   const unit = currentUnit();
   if (!unit || !state.material) return;
   const allUnits = state.material[DEFAULT_STUDY_MODE] || [];
@@ -3054,14 +5078,14 @@ function updateResumeButton() {
   const saved = loadStudyPosition();
   const units = state.material?.[DEFAULT_STUDY_MODE] || [];
   const alreadyThere = currentUnit()?.id === saved?.unitId;
-  const visible = Boolean(saved && saved.index > 0 && !state.reviewOnly && !alreadyThere);
+  const visible = Boolean(saved && saved.index > 0 && !inReviewMode() && !alreadyThere);
   elements.resumeButton.classList.toggle("is-hidden", !visible);
   if (visible) elements.resumeButton.textContent = `继续上次 · ${saved.index + 1}/${units.length}`;
 }
 
 function resumeLastPosition() {
   const saved = loadStudyPosition();
-  if (!saved || state.reviewOnly) return;
+  if (!saved || inReviewMode()) return;
   state.index = saved.index;
   state.revealed = false;
   renderCurrentUnit();
@@ -3090,12 +5114,21 @@ async function saveTranscriptEdit() {
   const unit = currentUnit();
   const text = elements.transcriptEditInput.value.trim();
   if (!unit || !text) return;
+  const materialId = state.material.id;
   try {
-    const payload = await api(`/api/materials/${state.material.id}/sentences/${unit.id}`, { method: "PATCH", body: { text } });
+    const payload = await api(`/api/materials/${materialId}/sentences/${unit.id}`, {
+      method: "PATCH",
+      body: { text, expectedText: unit.text },
+    });
+    if (state.material?.id !== materialId) return;
     state.material = payload.material;
+    if (payload.job) {
+      state.material.analysisStatus = "processing";
+      scheduleAnalysisStatusPoll(500);
+    }
     closeTranscriptEditor();
     renderCurrentUnit();
-    showToast("原文修正已保存在本机");
+    showToast("原文修正已保存在本机，正在更新讲解");
   } catch (error) {
     showToast(error.message);
   }
@@ -3108,7 +5141,7 @@ async function retryAnalysis() {
     state.activeJobId = payload.job.id;
     state.material.analysisStatus = "processing";
     scheduleAnalysisStatusPoll(500);
-    showToast("Codex 正在重新生成讲解");
+    showToast("所选 AI 正在重新生成讲解");
   } catch (error) {
     showToast(error.message);
   }
@@ -3116,7 +5149,7 @@ async function retryAnalysis() {
 
 function scheduleAnalysisStatusPoll(delay = 8000) {
   clearTimeout(state.analysisPollTimer);
-  if (!state.material || state.material.analysisStatus !== "processing") {
+  if (!state.material || !["pending", "processing"].includes(state.material.analysisStatus)) {
     state.analysisPollTimer = null;
     return;
   }
@@ -3131,7 +5164,7 @@ async function pollAnalysisStatus(materialId) {
     const status = library.materials.find((material) => material.id === materialId);
     if (!status) return;
     if (state.material?.id !== materialId) return;
-    if (status.analysisStatus === "processing") {
+    if (["pending", "processing"].includes(status.analysisStatus)) {
       if (status.stage && status.stage !== state.material.stage) {
         const payload = await api(`/api/materials/${materialId}`);
         if (state.material?.id !== materialId) return;
@@ -3149,7 +5182,7 @@ async function pollAnalysisStatus(materialId) {
     renderTraining();
     showToast(status.analysisStatus === "ready" ? "讲解已经生成完成" : (status.warning || "讲解生成失败，可以重新生成"));
   } catch {
-    if (state.material?.id === materialId && state.material.analysisStatus === "processing") {
+    if (state.material?.id === materialId && ["pending", "processing"].includes(state.material.analysisStatus)) {
       scheduleAnalysisStatusPoll(15000);
     }
   }
@@ -3159,7 +5192,7 @@ function handleKeyboard(event) {
   if (event.defaultPrevented) return;
   if (event.key === "Escape" && !elements.askPanel.classList.contains("is-hidden")) {
     event.preventDefault();
-    closeAskPanel();
+    collapseAskRail();
     return;
   }
   if (event.key === "Escape" && elements.segmentDrawer.classList.contains("is-open")) {
@@ -3325,6 +5358,11 @@ async function api(url, options = {}) {
   }
   const response = await fetch(url, init);
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.detail || payload.error || `请求失败 (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(payload.detail || payload.error || payload.message || `请求失败 (${response.status})`);
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
+  }
   return payload;
 }

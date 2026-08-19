@@ -38,8 +38,13 @@ node scripts/doctor.mjs
 doctor_status=$?
 
 echo "说明："
-echo "- Codex 必须由每位测试者使用自己的 ChatGPT 账号执行 codex login。"
+echo "- 交给 Codex/Cursor 安装时，可在原对话中选择模型；手动安装也可在首次网页中设置。"
+echo "- 当前安装代理只建议它自身对应的服务，不会静默换用另一账号。"
+echo "- 无论选择 Codex 还是 Cursor，都由每位测试者使用自己的账号登录；本项目不保存账号 token。"
+echo "- Codex 登录命令：codex login"
+echo "- Cursor Agent 登录命令：cursor-agent login"
 echo "- 本地文件、学习进度和问问记录只保存在当前电脑的 .data 目录。"
+echo "- 原始音视频留在本机；AI 讲解会把所需逐字稿片段发送给你选择的服务。"
 echo "- 飞书导入是可选能力；不安装 lark-cli 仍可使用本地音频或录屏。"
 echo "- Whisper 模型只会在你明确运行 npm run setup:model 后下载。"
 echo

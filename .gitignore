@@ -9,6 +9,11 @@
 .env*
 *.local
 .privacy-denylist.local
+.auth/
+.credentials/
+.settings/
+auth.local.json
+settings.local.json
 
 # Dependencies and generated output.
 node_modules/

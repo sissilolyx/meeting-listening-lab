@@ -30,16 +30,20 @@ for (const materialId of materialIds) {
   ]);
   const material = JSON.parse(materialRaw);
   const result = alignSentencePlaybackRanges(material.sentences, whisperPayload, { force });
-  const unchangedCount = material.sentences.length - result.alignedCount - result.skippedCount;
+  const unchangedCount = material.sentences.length
+    - result.alignedCount
+    - result.clearedCount
+    - result.skippedCount;
   console.log(JSON.stringify({
     materialId,
     sentenceCount: material.sentences.length,
     alignedCount: result.alignedCount,
+    clearedCount: result.clearedCount,
     skippedCount: result.skippedCount,
     unchangedCount,
     dryRun,
   }));
-  if (dryRun || result.alignedCount === 0) continue;
+  if (dryRun || (result.alignedCount === 0 && result.clearedCount === 0)) continue;
 
   const backupPath = path.join(directory, `material.before-playback-alignment.${backupTimestamp()}.json`);
   await fs.copyFile(materialPath, backupPath, constants.COPYFILE_EXCL);
@@ -48,6 +52,7 @@ for (const materialId of materialIds) {
     const next = { ...sentence };
     for (const field of playbackFields) {
       if (Object.hasOwn(aligned, field)) next[field] = aligned[field];
+      else if (force) delete next[field];
     }
     return next;
   });

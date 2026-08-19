@@ -23,17 +23,20 @@ const forbiddenContentPatterns = [
 ];
 const localPrivacyIndex = buildLocalPrivacyIndex();
 
-function trackedFiles() {
+function candidateFiles() {
   try {
-    const output = execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8" });
+    const output = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
+      cwd: root,
+      encoding: "utf8",
+    });
     return output.split("\0").filter(Boolean);
   } catch (error) {
     throw new Error(`无法读取 Git 文件清单。请先在项目目录初始化 Git：${error.message}`);
   }
 }
 
-const files = trackedFiles();
-if (!files.length) throw new Error("Git 中还没有已跟踪文件，无法执行发布隐私检查");
+const files = candidateFiles();
+if (!files.length) throw new Error("Git 中没有可发布文件，无法执行发布隐私检查");
 
 const failures = [];
 for (const relative of files) {
@@ -68,7 +71,7 @@ if (failures.length) {
   process.exit(1);
 }
 
-console.log(`发布隐私检查通过：已检查 ${files.length} 个 Git 跟踪文件，未发现本地材料或已知个人信息。`);
+console.log(`发布隐私检查通过：已检查 ${files.length} 个 Git 跟踪及待跟踪文件，未发现本地材料或已知个人信息。`);
 
 function buildLocalPrivacyIndex() {
   const terms = new Set(readOptionalDenylist());

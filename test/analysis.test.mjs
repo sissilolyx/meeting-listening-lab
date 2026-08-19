@@ -70,7 +70,7 @@ test("analysis publishes a material snapshot after every completed batch", async
     for (const [index, sentence] of sentences.entries()) {
       const batch = [sentence];
       const fingerprint = createHash("sha256")
-        .update(JSON.stringify({ version: "spoken-form-v3", kind: "full", batch }))
+        .update(JSON.stringify({ version: "provider-v1-spoken-form-v3", provider: "codex", model: "synthetic-model", kind: "full", batch }))
         .digest("hex")
         .slice(0, 12);
       const result = {
@@ -85,13 +85,14 @@ test("analysis publishes a material snapshot after every completed batch", async
         }],
       };
       await fs.writeFile(
-        path.join(directory, `codex-full-${String(index + 1).padStart(3, "0")}-${fingerprint}.json`),
+        path.join(directory, `ai-codex-full-${String(index + 1).padStart(3, "0")}-${fingerprint}.json`),
         JSON.stringify(result),
       );
     }
 
     const snapshots = [];
     const result = await analyzeMaterial({ title: "Test", sentences }, directory, {
+      aiSettings: { provider: "codex", model: "synthetic-model" },
       onBatch: (snapshot) => snapshots.push(snapshot),
     });
 

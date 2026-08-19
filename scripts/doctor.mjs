@@ -13,7 +13,10 @@ const MODEL_PATH = path.resolve(
 const MINIMUM_NODE_MAJOR = 22;
 const REQUIRED_MODEL_BYTES = 100 * 1024 * 1024;
 
-augmentMacPath();
+// Synthetic tests supply an isolated PATH so they never inspect or invoke the
+// developer's real Codex/Cursor installations. Normal launches always augment
+// Finder's minimal PATH as before.
+if (process.env.LISTENING_DOCTOR_TEST_PATH_ONLY !== "1") augmentMacPath();
 
 const checks = [];
 const platformReady = process.platform === "darwin";
@@ -55,8 +58,8 @@ for (const [id, label, command, fix] of [
 const codexPath = findExecutable("codex");
 checks.push({
   id: "codex",
-  label: "Codex CLI",
-  required: true,
+  label: "Codex CLI（AI 讲解服务，可选）",
+  required: false,
   ok: Boolean(codexPath),
   detail: codexPath || "未找到",
   fix: "npm install -g @openai/codex",
@@ -75,11 +78,41 @@ if (codexPath) {
 }
 checks.push({
   id: "codex-login",
-  label: "Codex ChatGPT 登录",
-  required: true,
+  label: "Codex ChatGPT 登录（可选）",
+  required: false,
   ok: codexLoginReady,
   detail: codexLoginDetail,
   fix: "codex login",
+});
+
+const cursorPath = findExecutable("cursor-agent");
+checks.push({
+  id: "cursor-agent",
+  label: "Cursor Agent CLI（AI 讲解服务，可选）",
+  required: false,
+  ok: Boolean(cursorPath),
+  detail: cursorPath || "未找到；仍可选择 Codex",
+  fix: "curl https://cursor.com/install -fsS | bash",
+});
+
+let cursorLoginDetail = "请先安装 Cursor Agent CLI";
+let cursorLoginReady = false;
+if (cursorPath) {
+  const login = safeRun(cursorPath, ["status"], { timeoutMs: 15_000 });
+  const output = compactOutput(`${login.stdout}\n${login.stderr}`);
+  cursorLoginReady = login.ok && !/not authenticated|not logged in|unauthenticated/i.test(output);
+  if (cursorLoginReady) cursorLoginDetail = "已登录 Cursor";
+  else if (output) cursorLoginDetail = output;
+  else if (login.timedOut) cursorLoginDetail = "检查登录状态超时";
+  else cursorLoginDetail = "未检测到 Cursor 登录";
+}
+checks.push({
+  id: "cursor-login",
+  label: "Cursor 账号登录（可选）",
+  required: false,
+  ok: cursorLoginReady,
+  detail: cursorLoginDetail,
+  fix: "cursor-agent login",
 });
 
 let modelSize = 0;
@@ -125,7 +158,8 @@ checks.push({
 });
 
 const requiredReady = checks.filter((check) => check.required).every((check) => check.ok);
-printReport(checks, requiredReady);
+const aiReady = codexLoginReady || cursorLoginReady;
+printReport(checks, requiredReady, aiReady);
 process.exitCode = requiredReady ? 0 : 1;
 
 function augmentMacPath() {
@@ -191,7 +225,7 @@ function safeRun(command, args, options = {}) {
   }
 }
 
-function printReport(items, ready) {
+function printReport(items, ready, aiReady) {
   console.log("\n原声精听 · 本机检查");
   console.log("====================\n");
   for (const item of items) {
@@ -211,7 +245,12 @@ function printReport(items, ready) {
   }
 
   if (ready) {
-    console.log("\n✓ 必需能力已经就绪。运行 ./start.command 开始使用。\n");
+    console.log("\n✓ 本地听音与转写能力已经就绪。运行 ./start.command 开始使用。");
+    if (aiReady) {
+      console.log("✓ 已检测到至少一个可用的 AI 讲解服务。首次启动时可选择服务和模型。\n");
+    } else {
+      console.log("○ 尚未检测到已登录的 AI 讲解服务。网站仍可启动；首次打开后按引导选择并登录 Codex 或 Cursor。\n");
+    }
   } else {
     console.log("\n必需能力尚未全部就绪。按上方命令处理后，再运行 npm run doctor。\n");
   }
