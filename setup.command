@@ -4,7 +4,7 @@ set -uo pipefail
 cd "$(dirname "$0")"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "原声精听私有测试版目前仅支持 macOS。"
+  echo "英语精听训练目前仅支持 macOS。"
   exit 1
 fi
 
@@ -20,7 +20,7 @@ for resources in \
 done
 
 echo
-echo "原声精听 · macOS 私有测试版设置"
+echo "英语精听训练 · macOS 本地版设置"
 echo "================================"
 echo "此脚本只检查和给出命令，不会自动安装软件、登录账号或上传材料。"
 echo
@@ -40,7 +40,8 @@ doctor_status=$?
 echo "说明："
 echo "- 交给 Codex/Cursor 安装时，可在原对话中选择模型；手动安装也可在首次网页中设置。"
 echo "- 当前安装代理只建议它自身对应的服务，不会静默换用另一账号。"
-echo "- 无论选择 Codex 还是 Cursor，都由每位测试者使用自己的账号登录；本项目不保存账号 token。"
+echo "- 当前版本只支持 Codex 和 Cursor；选择哪一个，就消耗当前登录的对应账号额度或 token。"
+echo "- 每位使用者使用自己的账号登录；本项目不提供共享 token，也不保存账号凭据。"
 echo "- Codex 登录命令：codex login"
 echo "- Cursor Agent 登录命令：cursor-agent login"
 echo "- 本地文件、学习进度和问问记录只保存在当前电脑的 .data 目录。"

@@ -1,6 +1,6 @@
 # Privacy and local-data boundary
 
-This private macOS evaluation build is designed for one learner per local
+This source-available macOS application is designed for one learner per local
 installation. It has no product account system, shared cloud database,
 telemetry, or cross-device synchronization.
 
@@ -21,24 +21,27 @@ Downloaded speech-recognition models are stored in `.models/`. Both directories
 are excluded from Git. Common audio and video extensions are also excluded as a
 second safeguard if a file is accidentally copied elsewhere in the repository.
 
-Each tester has a separate local data directory and uses their own locally
+Each user has a separate local data directory and uses their own locally
 authenticated official CLI accounts. Installing or updating the source code
-does not upload or synchronize one tester's materials, settings, credentials,
-or account usage with another tester.
+does not upload or synchronize one user's materials, settings, credentials,
+or account usage with another user.
 
 ## When external services are contacted
 
-- **Selected AI provider:** only the transcript context needed for an analysis
-  or question is passed to the tester's own locally authenticated Codex or
-  Cursor Agent process. Original audio/video is not sent to either AI provider
+- **Selected AI provider:** this version supports Codex and Cursor only. Only
+  the transcript context needed for an analysis or question is passed to the
+  user's own locally authenticated Codex or Cursor Agent process. The request
+  consumes the quota or tokens of that selected, signed-in account; the project
+  does not provide a shared allowance. Original audio/video is not sent to
+  either AI provider
   by this application. The learner chooses the provider and model on first
   launch, can switch later from the global setting, and the application does
   not silently fall back to the other provider.
-- **Feishu/Lark:** when a tester explicitly imports a Minutes link, the local
-  Feishu/Lark tooling contacts that service using the tester's own account and
+- **Feishu/Lark:** when a user explicitly imports a Minutes link, the local
+  Feishu/Lark tooling contacts that service using the user's own account and
   permissions to retrieve the selected material.
 - **Model download:** setup may download a local speech-recognition model. The
-  model runs on the tester's computer after download.
+  model runs on the user's computer after download.
 
 The application does not silently fall back to a separately billed AI API.
 
@@ -58,7 +61,7 @@ them. Deleting the local data directory removes the remaining learning data for
 that installation. Git operations do not back up or restore local learning
 data.
 
-## Tester responsibility
+## User responsibility
 
 Only import material that you are authorized to access and process. Follow the
 meeting owner's confidentiality requirements and your organization's policies.

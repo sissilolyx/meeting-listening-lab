@@ -1,18 +1,38 @@
-# 原声精听（macOS 私有测试版）
+# English Intensive Listening Trainer｜英语精听训练（macOS）
 
 把真实英文会议录音或录屏变成可逐段听写、核对、讲解和复习的本地工具。训练时播放的始终是真实会议原声，不是 AI 配音。
 
-> 这是面向受邀测试者的 **macOS 本地自托管版本**。GitHub 私有仓库只分发源代码；它不是 GitHub Pages，也不是云端网站。每位测试者需要把代码下载到自己的 Mac，在自己的电脑上启动。
+> 这是一个公开提供源代码、在 **macOS 本机自托管** 的英语精听工具。GitHub 仓库只分发代码；它不是 GitHub Pages，也不是云端网站。任何人都可以下载代码并在自己的 Mac 上启动；每位使用者的材料、学习数据和账号彼此隔离。
+
+> 当前版本的 AI 讲解只支持 **Codex** 和 **Cursor**。选择 Codex 时，生成任务会计入当前登录的 Codex/ChatGPT 账号额度；选择 Cursor 时，会计入当前登录的 Cursor 账号额度。项目不提供共享 Token，也不代管任何账号凭据。
+
+> 本项目源码公开，但仅授权用于非商业目的。可以按许可证使用、修改和分发；商业用途需要另行取得权利人的许可。
+
+## 产品一览
+
+> 以下截图来自真实产品界面，但材料标题、说话人、逐字稿和学习记录均为专门制作的虚构演示数据，不包含维护者的真实会议内容。
+
+### 画面精听：原声、听写与逐句讲解
+
+![画面精听工作区：材料库、片段目录、会议画面、听写区和逐句讲解](docs/images/overview.png)
+
+### 纯听模式：音频固定，讲解纵向滚动
+
+![纯听工作区：固定原声音频控制和可滚动逐句讲解](docs/images/listen-only.png)
+
+### AI 辅助：表达讲解、例句与独立问问卡片
+
+![表达展开讲解、例句与右侧独立问问卡片](docs/images/ask-and-explain.png)
 
 ## 最简单：把 GitHub 链接交给 Codex 或 Cursor
 
-先确保你的 GitHub 账号已经获得私有仓库访问权限，然后把 [meeting-listening-lab 仓库链接](https://github.com/sissilolyx/meeting-listening-lab) 发给运行在**你自己 Mac 上**、能够使用本地终端和浏览器的 Codex 或 Cursor。可以只说：
+仓库已经公开。把 [meeting-listening-lab 仓库链接](https://github.com/sissilolyx/meeting-listening-lab) 发给运行在**你自己 Mac 上**、能够使用本地终端和浏览器的 Codex 或 Cursor。可以只说：
 
 > 请在我的 Mac 上安装或更新这个项目并打开网站：https://github.com/sissilolyx/meeting-listening-lab 。先完整阅读 README 的“给安装代理的执行契约”。复用已有安装目录和本机数据；你是 Codex 就默认使用 Codex，你是 Cursor 就默认使用 Cursor。读取我账号当前可用的模型后在这个对话里让我选，或者打开网页让我选。不要删除、清理或上传 `.data/`、`.models/`，不要替我运行会消耗额度的连接测试。
 
 代理完成后会打开同一个本地网站。不是两套应用，也不需要“从 Codex 打开一个版本、从 Cursor 打开另一个版本”：Codex/Cursor 只是这个网站所调用的 AI 讲解服务。
 
-> 云端 Agent 不能替你保存或打开 Mac 上的本地材料；这条安装方式要求代理能够操作你当前这台电脑。私有仓库访问、系统依赖安装、约 466 MB 的 Whisper 模型下载以及官方账号登录，仍可能需要你本人确认。
+> 云端 Agent 不能替你保存或打开 Mac 上的本地材料；这条安装方式要求代理能够操作你当前这台电脑。系统依赖安装、约 466 MB 的 Whisper 模型下载以及官方账号登录，仍可能需要你本人确认。
 
 ### 给安装代理的执行契约
 
@@ -30,21 +50,21 @@
 2. **不得“清理后重装”。** 禁止 `git reset --hard`、`git clean -fd`、`git clean -fdx`、删除旧目录、自动 stash 或用新 clone 覆盖旧目录。遇到公开代码的本地改动时停止并请用户决定。
 3. **本机数据不可读、不可传、不可改。** `.data/` 包含材料、逐字稿、学习进度、复习、问问、学习偏好以及 AI provider/model 设置；`.models/` 包含 Whisper 模型。安装或更新不需要读取其中内容。
 4. **依赖安装要先说明。** 先运行 `./setup.command`。执行 Homebrew 安装、`npm run setup:model`、Cursor 的远程安装脚本或任何账号登录前，先说明将发生什么并获得用户确认；绝不索取、复制或写入 Token。
-5. **当前代理决定 provider，用户决定模型。** 首次设置为空时，Codex 会话只建议 `codex`，Cursor 会话只建议 `cursor`；不得静默换用另一个服务。读取该账号的动态模型目录，让用户在当前对话明确选择模型；用户也可以选择在首次打开的网页中设置。
+5. **当前版本只支持 Codex 和 Cursor；当前代理决定 provider，用户决定模型。** 首次设置为空时，Codex 会话只建议 `codex`，Cursor 会话只建议 `cursor`；不得静默换用另一个服务。读取该账号的动态模型目录，让用户在当前对话明确选择模型；用户也可以选择在首次打开的网页中设置。
 6. **对话内选择不消耗模型额度。** 启动后可从实际本地地址 `GET /api/ai-settings` 读取状态和模型；用户选定后，以 `PATCH /api/ai-settings` 仅保存 `{provider, model}`，再 GET 校验。已有设置时不得覆盖，除非用户明确要求切换。不要调用 `POST /api/ai-settings/test`，也不要为了验收触发讲解或“问问”。
 7. **打开实际地址。** 使用 `./start.command`，等待服务可访问后打开脚本实际打印的 `http://127.0.0.1:<端口>/`；端口不一定是 4173，运行终端需要保持打开。
 
-GitHub 登录只决定能否 clone/pull；Codex 或 Cursor CLI 登录决定使用谁的 AI 额度；Lark 登录只用于可选的妙记导入。这三类账号彼此独立，每位使用者都使用自己的账号。
+公开仓库的 clone/pull 不需要受邀权限；GitHub 登录只在提交代码等写操作时需要。Codex 或 Cursor CLI 登录决定使用谁的 AI 额度；Lark 登录只用于可选的妙记导入。这三类账号彼此独立，每位使用者都使用自己的账号。
 
 ## 先了解数据边界
 
 - 材料、音视频、逐字稿、学习进度、复习内容和“问问”记录默认保存在当前项目的 `.data/`，只在这台电脑的这个项目副本中使用。
-- 不同测试者之间没有账号数据同步，也不会同步你的材料。换电脑、换项目目录或删除 `.data/` 后，原来的学习数据不会自动出现。
+- 不同使用者之间没有账号数据同步，也不会同步你的材料。换电脑、换项目目录或删除 `.data/` 后，原来的学习数据不会自动出现。
 - 本地音视频由 `whisper.cpp` 在电脑上转写，不会上传到 GitHub，也不会由本项目上传到自建云存储。
 - 这是同一个本地网页，不需要分别安装 Codex 版和 Cursor 版。通过本机代理安装时，代理会建议使用它自身对应的服务，并让你在对话里选择模型；手动安装时可在首次打开的网页中选择。以后会记住上次选择，也可以从左侧全局入口随时切换。
 - 讲解和“问问”通过本机登录的 Codex CLI 或 Cursor Agent CLI 生成。项目只把完成当前请求所需的逐字稿片段、问题和语境交给你主动选择的服务；原始音频和视频不交给 AI 服务。请只导入符合你所在组织及所选服务使用规则的内容。若内容完全不能离开电脑，请不要使用讲解或“问问”功能。
-- 每位测试者使用自己的官方 CLI 登录和自己的账号额度。本项目不要求把 API Key 写进项目，也不会把 Codex/Cursor 凭据写入仓库、`.data/` 或项目配置；登录凭据由各自的官方 CLI 管理。应用不会在两个服务之间静默回退。
-- 飞书/Lark 导入是可选能力。使用者需要在自己的电脑上安装并登录 `lark-cli`；本项目不会共享仓库维护者或其他测试者的 Lark 登录。
+- 当前版本只支持 Codex 和 Cursor。每位使用者通过自己的官方 CLI 登录并消耗自己的账号额度或 Token；选择 Codex 不会消耗 Cursor 额度，选择 Cursor 也不会消耗 Codex 额度。本项目不提供共享 Token，不要求把 API Key 写进项目，也不会把 Codex/Cursor 凭据写入仓库、`.data/` 或项目配置；登录凭据由各自的官方 CLI 管理。应用不会在两个服务之间静默回退。
+- 飞书/Lark 导入是可选能力。使用者需要在自己的电脑上安装并登录 `lark-cli`；本项目不会共享仓库维护者或其他使用者的 Lark 登录。
 - 服务默认只监听 `127.0.0.1`。不要把 `HOST` 改成 `0.0.0.0`，不要做端口转发，也不要把它部署到公网服务器。
 
 ### 绝对不要提交的本地内容
@@ -64,10 +84,10 @@ GitHub 登录只决定能否 clone/pull；Codex 或 Cursor CLI 登录决定使�
 
 如果已经把链接交给 Codex/Cursor，可由代理按上一节完成这些步骤；下面是手动安装方式。
 
-1. 接受私有 GitHub 仓库邀请，然后在终端克隆代码：
+1. 从公开 GitHub 仓库克隆代码：
 
    ```bash
-   git clone <private-repository-url>
+   git clone https://github.com/sissilolyx/meeting-listening-lab.git
    cd meeting-listening-lab
    ```
 
@@ -111,7 +131,7 @@ GitHub 登录只决定能否 clone/pull；Codex 或 Cursor CLI 登录决定使�
 
 可选：
 
-- Codex CLI 或 Cursor Agent CLI；讲解和“问问”至少需要其中一个已使用测试者自己的账号登录
+- Codex CLI 或 Cursor Agent CLI；当前版本的讲解和“问问”只支持这两种服务，至少需要其中一个已使用当前使用者自己的账号登录
 - `lark-cli`，仅在粘贴飞书/Lark 妙记链接时需要
 
 使用 Homebrew 的 Mac 可以先安装常见依赖：
@@ -122,11 +142,11 @@ brew install node@22 ffmpeg whisper-cpp
 
 ## AI 讲解服务
 
-网页始终通过同一个 `start.command` 启动。安装代理可以把自身对应的服务作为建议，并在原对话中让你选择模型；也可以不预设，直接由你在第一次打开网页时选择。以后会记住上次选择，并可从左侧全局入口切换。切换服务只影响之后新生成的内容，不会把已有讲解自动重新生成。
+网页始终通过同一个 `start.command` 启动。当前版本只支持 Codex 和 Cursor。安装代理可以把自身对应的服务作为建议，并在原对话中让你选择模型；也可以不预设，直接由你在第一次打开网页时选择。以后会记住上次选择，并可从左侧全局入口切换。切换服务只影响之后新生成的内容，不会把已有讲解自动重新生成；新任务会计入所选服务当前登录账号的额度或 Token。
 
 ### Codex
 
-按照 [Codex CLI 官方说明](https://developers.openai.com/codex/cli) 安装后，由当前测试者本人登录。登录方式和凭据保存规则见 [Codex 认证说明](https://developers.openai.com/codex/auth)：
+按照 [Codex CLI 官方说明](https://developers.openai.com/codex/cli) 安装后，由当前使用者本人登录。登录方式和凭据保存规则见 [Codex 认证说明](https://developers.openai.com/codex/auth)：
 
 ```bash
 npm install -g @openai/codex
@@ -136,7 +156,7 @@ codex login status
 
 ### Cursor
 
-Cursor 桌面应用和供本项目后台调用的 Cursor Agent CLI 不是同一个命令。按照 [Cursor Agent CLI 官方安装说明](https://cursor.com/docs/cli/installation) 安装后，由当前测试者本人登录；认证说明见 [Cursor CLI Authentication](https://cursor.com/docs/cli/reference/authentication)：
+Cursor 桌面应用和供本项目后台调用的 Cursor Agent CLI 不是同一个命令。按照 [Cursor Agent CLI 官方安装说明](https://cursor.com/docs/cli/installation) 安装后，由当前使用者本人登录；认证说明见 [Cursor CLI Authentication](https://cursor.com/docs/cli/reference/authentication)：
 
 ```bash
 curl https://cursor.com/install -fsS | bash
@@ -291,7 +311,7 @@ cursor-agent status
 npm run doctor
 ```
 
-确认显示的是测试者自己的账号。不要在项目内创建或粘贴 API Key、访问 token 或 Cursor/Codex 登录文件。
+确认显示的是你自己的账号。不要在项目内创建或粘贴 API Key、访问 token 或 Cursor/Codex 登录文件。
 
 ### 本地文件可用，但飞书链接不可用
 
@@ -336,4 +356,12 @@ npm test
 git status
 ```
 
-仓库中只能出现代码和公开文档，不能出现任何测试者的 `.data/`、`.models/`、`.env`、会议音视频、逐字稿或学习记录。
+仓库中只能出现代码和公开文档，不能出现任何使用者的 `.data/`、`.models/`、`.env`、会议音视频、逐字稿或学习记录。
+
+## 许可证
+
+本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE)（SPDX：`PolyForm-Noncommercial-1.0.0`）。
+
+任何个人或实体均可在非商业目的下使用、修改和分发本软件及其修改版本，但须遵守许可证条款，并在分发时保留许可证文本或其官方链接，以及所有 `Required Notice:` 声明。
+
+本许可证不授予商业用途权利。如需将本软件用于商业目的，请另行联系仓库所有者取得许可。由于限制商业使用，本项目属于源码公开、源代码可用（source-available）的软件，并非 OSI 定义下的开源软件。

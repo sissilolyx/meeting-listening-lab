@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "原声精听私有测试版目前仅支持 macOS。"
+  echo "英语精听训练目前仅支持 macOS。"
   exit 1
 fi
 
@@ -30,7 +30,7 @@ if ! node scripts/doctor.mjs; then
   exit 1
 fi
 
-# 为避免材料暴露到局域网，私有测试版始终只监听本机。
+# 为避免材料暴露到局域网，本地版始终只监听本机。
 export HOST="127.0.0.1"
 requested_port="${PORT:-4173}"
 selected_port="$(node --input-type=module -e '
@@ -61,7 +61,7 @@ url="http://$HOST:$PORT"
 if [[ "$PORT" != "$requested_port" ]]; then
   echo "端口 $requested_port 已被占用，已改用 ${PORT}。"
 fi
-echo "正在启动原声精听：$url"
+echo "正在启动英语精听训练：$url"
 
 # 等服务真正可访问后再打开浏览器，避免启动较慢时出现连接被拒绝。
 # LISTENING_NO_OPEN 仅供自动检查使用；正常双击不需要设置。

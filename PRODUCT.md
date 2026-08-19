@@ -1,10 +1,10 @@
-# 原声精听
+# 英语精听训练
 
 register: product
 
 ## Product purpose
 
-Turn real English meeting recordings into focused listening practice without replacing the original voices. The first release is a private macOS evaluation build for one local learner per installation.
+Turn real English meeting recordings into intensive English listening practice without replacing the original voices. The current release is a source-available, noncommercial, locally self-hosted macOS build for one learner per installation.
 
 ## Primary user
 
