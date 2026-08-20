@@ -85,13 +85,15 @@ checks.push({
   fix: "codex login",
 });
 
-const cursorPath = findExecutable("cursor-agent");
+const cursorExecutable = findCursorAgentExecutable();
+const cursorPath = cursorExecutable?.path || null;
+const cursorCommand = cursorExecutable?.command || "agent";
 checks.push({
   id: "cursor-agent",
   label: "Cursor Agent CLI（AI 讲解服务，可选）",
   required: false,
   ok: Boolean(cursorPath),
-  detail: cursorPath || "未找到；仍可选择 Codex",
+  detail: cursorPath ? `${cursorPath}（命令：${cursorCommand}）` : "未找到 agent / cursor-agent；仍可选择 Codex",
   fix: "curl https://cursor.com/install -fsS | bash",
 });
 
@@ -112,7 +114,7 @@ checks.push({
   required: false,
   ok: cursorLoginReady,
   detail: cursorLoginDetail,
-  fix: "cursor-agent login",
+  fix: `${cursorCommand} login`,
 });
 
 let modelSize = 0;
@@ -201,6 +203,24 @@ function findExecutable(command) {
       return candidate;
     } catch {
       // Continue searching without treating a missing command as an error.
+    }
+  }
+  return null;
+}
+
+function findCursorAgentExecutable() {
+  for (const command of ["agent", "cursor-agent"]) {
+    const commandPath = findExecutable(command);
+    if (!commandPath) continue;
+    if (command === "cursor-agent") return { path: commandPath, command };
+
+    // `agent` is a generic binary name. Match the same Cursor signature used
+    // by the runtime provider resolver so an unrelated executable is not
+    // reported as Cursor Agent CLI.
+    const help = safeRun(commandPath, ["--help"], { timeoutMs: 10_000 });
+    const output = `${help.stdout}\n${help.stderr}`;
+    if (help.ok && /cursor|cloud agent|agent cli/i.test(output)) {
+      return { path: commandPath, command };
     }
   }
   return null;

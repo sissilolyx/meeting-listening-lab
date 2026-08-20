@@ -40,6 +40,34 @@ test("doctor reports a synthetic authenticated Cursor provider without reading r
   }
 });
 
+test("doctor recognizes the current Cursor agent command without mistaking a generic binary", {
+  skip: process.platform !== "darwin" ? "macOS-only application check" : false,
+}, () => {
+  const fixture = createFixture({ cursor: true, cursorCommand: "agent" });
+  try {
+    const result = runDoctor(fixture);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /命令：agent/);
+    assert.match(result.stdout, /已登录 Cursor/);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("doctor ignores an unrelated executable named agent", {
+  skip: process.platform !== "darwin" ? "macOS-only application check" : false,
+}, () => {
+  const fixture = createFixture({ genericAgent: true });
+  try {
+    const result = runDoctor(fixture);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /未找到 agent \/ cursor-agent/);
+    assert.doesNotMatch(result.stdout, /已登录 Cursor/);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 function createFixture(options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "listening-doctor-"));
   const bin = path.join(root, "bin");
@@ -54,7 +82,16 @@ function createFixture(options = {}) {
     installExecutable(bin, name, "#!/bin/sh\nexit 0\n");
   }
   if (options.cursor) {
-    installExecutable(bin, "cursor-agent", "#!/bin/sh\n[ \"$1\" = status ] && echo 'Logged in as synthetic@example.invalid'\nexit 0\n");
+    installExecutable(bin, options.cursorCommand || "cursor-agent", [
+      "#!/bin/sh",
+      "[ \"$1\" = --help ] && echo 'Cursor Agent CLI' && exit 0",
+      "[ \"$1\" = status ] && echo 'Logged in as synthetic@example.invalid'",
+      "exit 0",
+      "",
+    ].join("\n"));
+  }
+  if (options.genericAgent) {
+    installExecutable(bin, "agent", "#!/bin/sh\necho 'unrelated task runner'\nexit 0\n");
   }
   return { root, bin, home, model };
 }

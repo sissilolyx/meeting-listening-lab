@@ -34,9 +34,11 @@
 
 仓库已经公开。把 [meeting-listening-lab 仓库链接](https://github.com/sissilolyx/meeting-listening-lab) 发给运行在**你自己 Mac 上**、能够使用本地终端和浏览器的 Codex 或 Cursor。可以只说：
 
-> 请在我的 Mac 上安装或更新这个项目并打开网站：https://github.com/sissilolyx/meeting-listening-lab 。先完整阅读 README 的“给安装代理的执行契约”。复用已有安装目录和本机数据；你是 Codex 就默认使用 Codex，你是 Cursor 就默认使用 Cursor。读取我账号当前可用的模型后在这个对话里让我选，或者打开网页让我选。不要删除、清理或上传 `.data/`、`.models/`，不要替我运行会消耗额度的连接测试。
+> 请在我的 Mac 上安装或更新这个项目并打开网站：https://github.com/sissilolyx/meeting-listening-lab 。先完整阅读 README 的“给安装代理的执行契约”。复用已有安装目录和本机数据；先运行 `./setup.command` 检测环境。你是 Codex 就只准备 Codex，你是 Cursor 就只准备 Cursor。若当前服务的官方 CLI 或项目必需依赖缺失，我授权你按 README 列出的官方方式执行安装；需要系统审批时直接向我发起审批，不要只把命令交给我。账号登录时请启动官方浏览器登录流程，等我完成账号选择、SSO/MFA 或授权后主动重新检测。读取我账号当前可用的模型后在这个对话里让我选，或者打开网页让我选。不要删除、清理或上传 `.data/`、`.models/`，不要索取或读取 Token，也不要替我运行会消耗额度的连接测试。
 
 代理完成后会打开同一个本地网站。不是两套应用，也不需要“从 Codex 打开一个版本、从 Cursor 打开另一个版本”：Codex/Cursor 只是这个网站所调用的 AI 讲解服务。
+
+> 仓库不会捆绑或静默安装 Codex/Cursor CLI，也不假定它们一定缺失。Agent 会先检测：已经安装并登录的就直接复用，只安装当前 Agent 对应且确实缺失的一个服务。Cursor 桌面应用与 Cursor Agent CLI 是两项独立安装；从 Cursor 打开仓库不代表后台所需的 CLI 已经安装。最终以 `./setup.command` / `npm run doctor` 的检测结果为准。
 
 > 云端 Agent 不能替你保存或打开 Mac 上的本地材料；这条安装方式要求代理能够操作你当前这台电脑。系统依赖安装、约 466 MB 的 Whisper 模型下载以及官方账号登录，仍可能需要你本人确认。
 
@@ -55,10 +57,11 @@
    这条兼容路径也会在合并前检查远端完整目录。确实没有旧安装时才 `git clone`。
 2. **不得“清理后重装”。** 禁止 `git reset --hard`、`git clean -fd`、`git clean -fdx`、删除旧目录、自动 stash 或用新 clone 覆盖旧目录。遇到公开代码的本地改动时停止并请用户决定。
 3. **本机数据不可读、不可传、不可改。** `.data/` 包含材料、逐字稿、学习进度、复习、问问、学习偏好以及 AI provider/model 设置；`.models/` 包含 Whisper 模型。安装或更新不需要读取其中内容。
-4. **依赖安装要先说明。** 先运行 `./setup.command`。执行 Homebrew 安装、`npm run setup:model`、Cursor 的远程安装脚本或任何账号登录前，先说明将发生什么并获得用户确认；绝不索取、复制或写入 Token。
-5. **当前版本只支持 Codex 和 Cursor；当前代理决定 provider，用户决定模型。** 首次设置为空时，Codex 会话只建议 `codex`，Cursor 会话只建议 `cursor`；不得静默换用另一个服务。读取该账号的动态模型目录，让用户在当前对话明确选择模型；用户也可以选择在首次打开的网页中设置。
-6. **对话内选择不消耗模型额度。** 启动后可从实际本地地址 `GET /api/ai-settings` 读取状态和模型；用户选定后，以 `PATCH /api/ai-settings` 仅保存 `{provider, model}`，再 GET 校验。已有设置时不得覆盖，除非用户明确要求切换。不要调用 `POST /api/ai-settings/test`，也不要为了验收触发讲解或“问问”。
-7. **打开实际地址。** 使用 `./start.command`，等待服务可访问后打开脚本实际打印的 `http://127.0.0.1:<端口>/`；端口不一定是 4173，运行终端需要保持打开。
+4. **检测后由代理完成安装，不要只给命令。** 先运行 `./setup.command`。若当前代理对应的官方 CLI 或项目必需依赖缺失，说明官方来源、将执行的命令、下载规模和系统改动；用户已使用上方模板明确授权时，直接发起必要的系统审批并在获批后执行。安装后刷新 PATH，再重新运行 `./setup.command` / `npm run doctor`。Codex 代理只准备 Codex，Cursor 代理只准备 Cursor，不安装另一服务。Homebrew、官方远程安装脚本和约 466 MB Whisper 模型下载都必须遵守当前 Agent 与系统的权限确认。
+5. **登录由代理发起、用户确认、代理复检。** 代理运行 `codex login` 或 `agent login`（旧版兼容命令可能是 `cursor-agent login`）并打开官方登录页；账号选择、密码、SSO、MFA、浏览器授权和 macOS 安全弹窗必须由用户本人完成。绝不索取、复制或写入 Token。用户确认完成后，代理主动检查登录状态与动态模型列表，不要让用户再手动输入检查命令。
+6. **当前版本只支持 Codex 和 Cursor；当前代理决定 provider，用户决定模型。** 首次设置为空时，Codex 会话只建议 `codex`，Cursor 会话只建议 `cursor`；不得静默换用另一个服务。读取该账号的动态模型目录，让用户在当前对话明确选择模型；用户也可以选择在首次打开的网页中设置。
+7. **对话内选择不消耗模型额度。** 启动后可从实际本地地址 `GET /api/ai-settings` 读取状态和模型；用户选定后，以 `PATCH /api/ai-settings` 仅保存 `{provider, model}`，再 GET 校验。已有设置时不得覆盖，除非用户明确要求切换。不要调用 `POST /api/ai-settings/test`，也不要为了验收触发讲解或“问问”。
+8. **打开实际地址。** 使用 `./start.command`，等待服务可访问后打开脚本实际打印的 `http://127.0.0.1:<端口>/`；端口不一定是 4173，运行终端需要保持打开。
 
 公开仓库的 clone/pull 不需要受邀权限；GitHub 登录只在提交代码等写操作时需要。Codex 或 Cursor CLI 登录决定使用谁的 AI 额度；Lark 登录只用于可选的妙记导入。这三类账号彼此独立，每位使用者都使用自己的账号。
 
@@ -111,7 +114,7 @@
    npm run setup:model
    ```
 
-   `setup.command` 只检测，不会自动安装或登录任何 AI 服务。账号准备命令见下方“AI 讲解服务”。即使暂时没有可用的 AI 登录，本地网页和听音能力仍可启动；讲解和“问问”会等到你完成选择与登录后再使用。
+   `setup.command` 本身只检测，不会被网页静默触发去安装或登录 AI 服务。若是把仓库链接交给本地 Agent，Agent 会按上方执行契约在获批后完成安装、发起登录并复检；手动安装时可使用下方“AI 讲解服务”的命令。即使暂时没有可用的 AI 登录，本地网页和听音能力仍可启动；讲解和“问问”会等到你完成选择与登录后再使用。
 
 4. 双击 `start.command`。它会选择本机可用端口、启动服务并打开正确的本地页面。也可以在终端运行：
 
@@ -150,27 +153,33 @@ brew install node@22 ffmpeg whisper-cpp
 
 网页始终通过同一个 `start.command` 启动。当前版本只支持 Codex 和 Cursor。安装代理可以把自身对应的服务作为建议，并在原对话中让你选择模型；也可以不预设，直接由你在第一次打开网页时选择。以后会记住上次选择，并可从左侧全局入口切换。切换服务只影响之后新生成的内容，不会把已有讲解自动重新生成；新任务会计入所选服务当前登录账号的额度或 Token。
 
+无需同时安装两个服务。设置页会分别显示检测结果：一个显示“已登录”、另一个显示“未安装”，只表示当前 Mac 只准备好了前者；选择后者前再让安装 Agent 按下方官方方式补齐即可。
+
 ### Codex
 
-按照 [Codex CLI 官方说明](https://developers.openai.com/codex/cli) 安装后，由当前使用者本人登录。登录方式和凭据保存规则见 [Codex 认证说明](https://developers.openai.com/codex/auth)：
+按照 [Codex CLI 官方说明](https://developers.openai.com/codex/cli) 安装后，由当前使用者本人完成官方浏览器登录。登录方式和凭据保存规则见 [Codex 认证说明](https://developers.openai.com/codex/auth)：
 
 ```bash
-npm install -g @openai/codex
+curl -fsSL https://chatgpt.com/codex/install.sh | sh
 codex login
 codex login status
 ```
 
+官方也提供 npm / Homebrew 安装选项；安装 Agent 应以当时官方文档和本机已有安装为准，不重复安装已有的 Codex CLI。
+
 ### Cursor
 
-Cursor 桌面应用和供本项目后台调用的 Cursor Agent CLI 不是同一个命令。按照 [Cursor Agent CLI 官方安装说明](https://cursor.com/docs/cli/installation) 安装后，由当前使用者本人登录；认证说明见 [Cursor CLI Authentication](https://cursor.com/docs/cli/reference/authentication)：
+Cursor 桌面应用和供本项目后台调用的 Cursor Agent CLI 不是同一个命令。按照 [Cursor Agent CLI 官方安装说明](https://cursor.com/docs/cli/installation) 安装后，由当前使用者本人完成官方浏览器登录；认证说明见 [Cursor CLI Authentication](https://cursor.com/docs/cli/reference/authentication)：
 
 ```bash
 curl https://cursor.com/install -fsS | bash
-cursor-agent login
-cursor-agent status
+agent login
+agent status
 ```
 
-安装脚本和登录都会由使用者本人在终端执行；本项目的 `setup.command` 只检测状态，不会代替使用者安装、登录或选择账号。
+Cursor 当前官方命令名是 `agent`；旧版安装可能仍提供 `cursor-agent`，本项目兼容两者。
+
+上面的命令供手动安装使用。把仓库链接交给能够操作当前 Mac 的本地 Agent 时，Agent 应完成“检测 → 执行获准的官方安装 → 发起登录 → 等用户完成浏览器确认 → 重新检测 → 让用户选模型 → 启动网站”，用户无需复制粘贴安装或检查命令。`setup.command` 本身仍只做检测，不会由网页静默安装软件。
 
 需要飞书妙记导入时，再安装并登录可选的 Lark CLI：
 
@@ -195,7 +204,7 @@ npm run doctor
 
 ```bash
 codex login status
-cursor-agent status
+agent status
 lark-cli auth status --json
 ```
 
@@ -312,10 +321,12 @@ npm run doctor
 Cursor：
 
 ```bash
-cursor-agent login
-cursor-agent status
+agent login
+agent status
 npm run doctor
 ```
+
+若旧版安装只提供 `cursor-agent`，将上面两条命令中的 `agent` 替换为 `cursor-agent`。
 
 确认显示的是你自己的账号。不要在项目内创建或粘贴 API Key、访问 token 或 Cursor/Codex 登录文件。
 
